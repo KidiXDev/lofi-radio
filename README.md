@@ -1,6 +1,6 @@
 # 🎧 Lofi Radio CLI
 
-A sleek, lightweight command-line interface for streaming high-quality Lofi music directly from YouTube playlists. Built with Go, powered by `yt-dlp` and `ffplay`.
+A sleek, lightweight command-line interface for streaming high-quality Lofi music directly from YouTube playlists. Built with Go, powered by `yt-dlp`, `ffplay`, and `go-tui`.
 
 ![Go Version](https://img.shields.io/badge/Go-1.25.1-00ADD8?style=flat-square&logo=go)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
@@ -8,7 +8,7 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 
 ## ✨ Features
 
-- **Interactive Full-Screen TUI**: Clean station picker and now-playing screen that restores your terminal cleanly on exit.
+- **Interactive Full-Screen TUI**: Built on [`go-tui`](https://github.com/grindlemire/go-tui) with clean station picker and now-playing screen.
 - **Bootstrap Progress View**: Shows live dependency download progress, transfer speed, and ETA when binaries need to be fetched.
 - **Music-Player Controls**: Pause/resume, volume up/down, station switching, and playback elapsed time in one lightweight interface.
 - **Auto-Discovery**: Fetches currently available stations from the configured YouTube playlist.
@@ -48,7 +48,7 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 - `Space` or `p`: Pause/resume playback
 - `+` / `-`: Volume up/down
 - `s`: Switch station while playing
-- `q` or `Esc`: Quit
+- `q` or `Esc`: Quit (or cancel while stream URL is resolving)
 
 ## 🛠️ How it Works
 
@@ -60,6 +60,7 @@ The application uses a modular architecture:
 ### Dependencies
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp): For extracting audio streams from YouTube.
 - [FFmpeg/FFplay](https://ffmpeg.org/): For high-performance audio playback.
+- [go-tui](https://github.com/grindlemire/go-tui): For the terminal UI framework.
 
 ## 📁 Project Structure
 

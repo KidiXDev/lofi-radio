@@ -1,17 +1,14 @@
 package tui
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"time"
 
+	gotui "github.com/grindlemire/go-tui"
 	"github.com/kidixdev/lofi-radio/internal/bootstrap"
 	"github.com/kidixdev/lofi-radio/internal/radio"
-	"golang.org/x/term"
 )
 
 type viewMode int
@@ -24,6 +21,11 @@ const (
 	viewError
 )
 
+const (
+	selectHint = "Enter play  Up/Down or k/j navigate  q quit"
+	playerHint = "Space pause/resume  +/- volume  s stations  q quit"
+)
+
 type asyncKind string
 
 const (
@@ -32,110 +34,407 @@ const (
 )
 
 type asyncResult struct {
-	kind      asyncKind
-	stations  []radio.Station
-	station   radio.Station
-	streamURL string
-	err       error
+	kind         asyncKind
+	stations     []radio.Station
+	station      radio.Station
+	streamURL    string
+	resolveToken int
+	err          error
 }
 
-type inputEvent struct {
-	name string
-	ch   rune
-}
-
-type App struct {
+type app struct {
 	playlistURL string
 
-	mode        viewMode
-	status      string
-	errMessage  string
-	footerHint  string
-	stations    []radio.Station
-	selectedIdx int
-
-	bootEvent bootstrap.ProgressEvent
+	mode       *gotui.State[viewMode]
+	status     *gotui.State[string]
+	errMessage *gotui.State[string]
+	footerHint *gotui.State[string]
+	stations   *gotui.State[[]radio.Station]
+	selected   *gotui.State[int]
+	bootEvent  *gotui.State[bootstrap.ProgressEvent]
 
 	player          *radio.Player
-	currentStation  radio.Station
-	volume          int
-	playing         bool
-	paused          bool
-	playStartedAt   time.Time
-	pausedStartedAt time.Time
-	totalPaused     time.Duration
+	currentStation  *gotui.State[radio.Station]
+	volume          *gotui.State[int]
+	playing         *gotui.State[bool]
+	paused          *gotui.State[bool]
+	playStartedAt   *gotui.State[time.Time]
+	pausedStartedAt *gotui.State[time.Time]
+	totalPaused     *gotui.State[time.Duration]
+	now             *gotui.State[time.Time]
 
-	terminal *terminalSession
-	inputCh  chan inputEvent
-	resultCh chan asyncResult
-	bootCh   chan bootstrap.ProgressEvent
-	doneCh   chan struct{}
+	resolveToken *gotui.State[int]
+	bootCh       chan bootstrap.ProgressEvent
+	resultCh     chan asyncResult
+
+	exitErr error
+	fatal   bool
 }
 
 func Run(playlistURL string) error {
-	terminalUI, err := newTerminalSession(os.Stdin, os.Stdout)
+	component := newApp(playlistURL)
+
+	ui, err := gotui.NewApp(
+		gotui.WithRootComponent(component),
+	)
 	if err != nil {
 		return err
 	}
-	defer terminalUI.Close()
+	defer ui.Close()
+	defer component.player.Stop()
 
-	app := &App{
-		playlistURL: playlistURL,
-		mode:        viewBoot,
-		status:      "Checking dependencies",
-		footerHint:  "Press q to quit",
-		volume:      55,
-		player:      radio.NewPlayer(55),
-		terminal:    terminalUI,
-		inputCh:     make(chan inputEvent, 32),
-		resultCh:    make(chan asyncResult, 8),
-		bootCh:      make(chan bootstrap.ProgressEvent, 32),
-		doneCh:      make(chan struct{}),
+	if err := ui.Run(); err != nil {
+		return err
 	}
 
-	go app.captureInput()
-	app.startBootstrap()
-	return app.loop()
+	return component.exitErr
 }
 
-func (a *App) loop() error {
-	ticker := time.NewTicker(120 * time.Millisecond)
-	defer ticker.Stop()
-	defer close(a.doneCh)
-	defer a.player.Stop()
+func newApp(playlistURL string) *app {
+	component := &app{
+		playlistURL: playlistURL,
 
-	for {
-		a.terminal.Render(a.render())
+		mode:       gotui.NewState(viewBoot),
+		status:     gotui.NewState("Checking dependencies"),
+		errMessage: gotui.NewState(""),
+		footerHint: gotui.NewState("Press q to quit"),
+		stations:   gotui.NewState([]radio.Station{}),
+		selected:   gotui.NewState(0),
+		bootEvent:  gotui.NewState(bootstrap.ProgressEvent{}),
 
-		select {
-		case <-ticker.C:
-			if a.mode == viewPlayer && a.playing && !a.player.IsRunning() {
-				a.playing = false
-				a.mode = viewError
-				a.errMessage = "playback stopped"
-				a.footerHint = "Press q to return"
+		player:          radio.NewPlayer(55),
+		currentStation:  gotui.NewState(radio.Station{}),
+		volume:          gotui.NewState(55),
+		playing:         gotui.NewState(false),
+		paused:          gotui.NewState(false),
+		playStartedAt:   gotui.NewState(time.Time{}),
+		pausedStartedAt: gotui.NewState(time.Time{}),
+		totalPaused:     gotui.NewState(time.Duration(0)),
+		now:             gotui.NewState(time.Now()),
+
+		resolveToken: gotui.NewState(0),
+		bootCh:       make(chan bootstrap.ProgressEvent, 64),
+		resultCh:     make(chan asyncResult, 8),
+	}
+
+	component.startBootstrap()
+	return component
+}
+
+func (a *app) BindApp(ui *gotui.App) {
+	a.mode.BindApp(ui)
+	a.status.BindApp(ui)
+	a.errMessage.BindApp(ui)
+	a.footerHint.BindApp(ui)
+	a.stations.BindApp(ui)
+	a.selected.BindApp(ui)
+	a.bootEvent.BindApp(ui)
+	a.currentStation.BindApp(ui)
+	a.volume.BindApp(ui)
+	a.playing.BindApp(ui)
+	a.paused.BindApp(ui)
+	a.playStartedAt.BindApp(ui)
+	a.pausedStartedAt.BindApp(ui)
+	a.totalPaused.BindApp(ui)
+	a.now.BindApp(ui)
+	a.resolveToken.BindApp(ui)
+}
+
+func (a *app) Watchers() []gotui.Watcher {
+	return []gotui.Watcher{
+		gotui.Watch(a.bootCh, a.onBootProgress),
+		gotui.Watch(a.resultCh, a.onAsyncResult),
+		gotui.OnTimer(200*time.Millisecond, a.onTick),
+	}
+}
+
+func (a *app) KeyMap() gotui.KeyMap {
+	return gotui.KeyMap{
+		gotui.OnStop(gotui.KeyCtrlC, func(ke gotui.KeyEvent) {
+			ke.App().Stop()
+		}),
+		gotui.OnStop(gotui.KeyEscape, func(ke gotui.KeyEvent) {
+			a.handleQuitOrBack(ke)
+		}),
+		gotui.OnStop(gotui.Rune('q'), func(ke gotui.KeyEvent) {
+			a.handleQuitOrBack(ke)
+		}),
+		gotui.OnStop(gotui.KeyUp, func(gotui.KeyEvent) {
+			a.moveSelection(-1)
+		}),
+		gotui.OnStop(gotui.Rune('k'), func(gotui.KeyEvent) {
+			a.moveSelection(-1)
+		}),
+		gotui.OnStop(gotui.Rune('w'), func(gotui.KeyEvent) {
+			a.moveSelection(-1)
+		}),
+		gotui.OnStop(gotui.KeyDown, func(gotui.KeyEvent) {
+			a.moveSelection(1)
+		}),
+		gotui.OnStop(gotui.Rune('j'), func(gotui.KeyEvent) {
+			a.moveSelection(1)
+		}),
+		gotui.OnStop(gotui.KeyEnter, func(ke gotui.KeyEvent) {
+			a.handleEnter(ke)
+		}),
+		gotui.OnStop(gotui.Rune(' '), func(gotui.KeyEvent) {
+			a.togglePause()
+		}),
+		gotui.OnStop(gotui.Rune('p'), func(gotui.KeyEvent) {
+			a.togglePause()
+		}),
+		gotui.OnStop(gotui.Rune('+'), func(gotui.KeyEvent) {
+			a.adjustVolume(5)
+		}),
+		gotui.OnStop(gotui.Rune('='), func(gotui.KeyEvent) {
+			a.adjustVolume(5)
+		}),
+		gotui.OnStop(gotui.Rune('0'), func(gotui.KeyEvent) {
+			a.adjustVolume(5)
+		}),
+		gotui.OnStop(gotui.Rune('-'), func(gotui.KeyEvent) {
+			a.adjustVolume(-5)
+		}),
+		gotui.OnStop(gotui.Rune('_'), func(gotui.KeyEvent) {
+			a.adjustVolume(-5)
+		}),
+		gotui.OnStop(gotui.Rune('9'), func(gotui.KeyEvent) {
+			a.adjustVolume(-5)
+		}),
+		gotui.OnStop(gotui.Rune('s'), func(gotui.KeyEvent) {
+			if a.mode.Get() == viewPlayer {
+				a.goToSelector("Pick another station")
 			}
-		case key := <-a.inputCh:
-			if a.handleKey(key) {
-				if a.errMessage != "" {
-					return errors.New(a.errMessage)
-				}
-				return nil
-			}
-		case event := <-a.bootCh:
-			a.bootEvent = event
-			if event.Type == bootstrap.ProgressEventStatus && strings.TrimSpace(event.Message) != "" {
-				a.status = event.Message
-			}
-		case result := <-a.resultCh:
-			if err := a.handleResult(result); err != nil {
-				return err
+		}),
+	}
+}
+
+func (a *app) onBootProgress(event bootstrap.ProgressEvent) {
+	a.bootEvent.Set(event)
+	if event.Type == bootstrap.ProgressEventStatus && strings.TrimSpace(event.Message) != "" {
+		a.status.Set(event.Message)
+	}
+}
+
+func (a *app) onAsyncResult(result asyncResult) {
+	switch result.kind {
+	case asyncBootstrap:
+		if result.err != nil {
+			a.setFatalError(
+				fmt.Errorf("bootstrap failed: %w", result.err),
+				fmt.Sprintf("bootstrap failed: %v", result.err),
+			)
+			return
+		}
+
+		if len(result.stations) == 0 {
+			a.setFatalError(errors.New("no available stations found"), "no available stations found")
+			return
+		}
+
+		a.stations.Set(result.stations)
+		a.selected.Set(0)
+		a.mode.Set(viewSelect)
+		a.status.Set("Select a station")
+		a.footerHint.Set(selectHint)
+		a.errMessage.Set("")
+		a.fatal = false
+		a.exitErr = nil
+
+	case asyncResolve:
+		if result.resolveToken != a.resolveToken.Get() {
+			return
+		}
+
+		if result.err != nil {
+			a.setTransientError(fmt.Sprintf("stream resolution failed: %v", result.err))
+			return
+		}
+
+		if err := a.player.Play(result.streamURL); err != nil {
+			a.setTransientError(fmt.Sprintf("playback failed: %v", err))
+			return
+		}
+
+		now := time.Now()
+		a.currentStation.Set(result.station)
+		a.playing.Set(true)
+		a.paused.Set(false)
+		a.playStartedAt.Set(now)
+		a.pausedStartedAt.Set(time.Time{})
+		a.totalPaused.Set(0)
+		a.now.Set(now)
+		a.volume.Set(a.player.Volume())
+		a.mode.Set(viewPlayer)
+		a.status.Set("Playing")
+		a.footerHint.Set(playerHint)
+	}
+}
+
+func (a *app) onTick() {
+	if a.mode.Get() != viewPlayer || !a.playing.Get() {
+		return
+	}
+
+	if !a.player.IsRunning() {
+		a.playing.Set(false)
+		a.paused.Set(false)
+		a.setTransientError("playback stopped")
+		return
+	}
+
+	if !a.paused.Get() {
+		a.now.Set(time.Now())
+	}
+}
+
+func (a *app) handleQuitOrBack(ke gotui.KeyEvent) {
+	switch a.mode.Get() {
+	case viewResolving:
+		a.resolveToken.Update(func(v int) int { return v + 1 })
+		a.goToSelector("Select a station")
+		return
+
+	case viewError:
+		if len(a.stations.Get()) > 0 && !a.fatal {
+			a.goToSelector("Select a station")
+			return
+		}
+
+		if a.exitErr == nil {
+			msg := strings.TrimSpace(a.errMessage.Get())
+			if msg != "" {
+				a.exitErr = errors.New(msg)
 			}
 		}
+		ke.App().Stop()
+		return
+	}
+
+	ke.App().Stop()
+}
+
+func (a *app) handleEnter(ke gotui.KeyEvent) {
+	switch a.mode.Get() {
+	case viewSelect:
+		stations := a.stations.Get()
+		if len(stations) == 0 {
+			return
+		}
+
+		selected := clamp(a.selected.Get(), 0, len(stations)-1)
+		a.selected.Set(selected)
+		a.startResolve(stations[selected])
+
+	case viewError:
+		a.handleQuitOrBack(ke)
 	}
 }
 
-func (a *App) startBootstrap() {
+func (a *app) moveSelection(delta int) {
+	if a.mode.Get() != viewSelect {
+		return
+	}
+
+	stations := a.stations.Get()
+	if len(stations) == 0 || delta == 0 {
+		return
+	}
+
+	a.selected.Set(clamp(a.selected.Get()+delta, 0, len(stations)-1))
+}
+
+func (a *app) togglePause() {
+	if a.mode.Get() != viewPlayer {
+		return
+	}
+
+	if err := a.player.PauseToggle(); err != nil {
+		return
+	}
+
+	if a.paused.Get() {
+		a.paused.Set(false)
+
+		started := a.pausedStartedAt.Get()
+		if !started.IsZero() {
+			a.totalPaused.Set(a.totalPaused.Get() + time.Since(started))
+		}
+
+		a.pausedStartedAt.Set(time.Time{})
+		a.status.Set("Playing")
+		a.now.Set(time.Now())
+		return
+	}
+
+	a.paused.Set(true)
+	a.pausedStartedAt.Set(time.Now())
+	a.status.Set("Paused")
+}
+
+func (a *app) adjustVolume(delta int) {
+	if a.mode.Get() != viewPlayer {
+		return
+	}
+
+	var (
+		volume int
+		err    error
+	)
+
+	if delta > 0 {
+		volume, err = a.player.IncreaseVolume(delta)
+	} else {
+		volume, err = a.player.DecreaseVolume(-delta)
+	}
+	if err != nil {
+		return
+	}
+
+	a.volume.Set(volume)
+}
+
+func (a *app) goToSelector(status string) {
+	if a.mode.Get() != viewPlayer && a.mode.Get() != viewSelect && a.mode.Get() != viewResolving && a.mode.Get() != viewError {
+		return
+	}
+
+	if len(a.stations.Get()) == 0 {
+		return
+	}
+
+	a.mode.Set(viewSelect)
+	a.status.Set(status)
+	a.footerHint.Set(selectHint)
+	a.errMessage.Set("")
+	if a.fatal {
+		a.fatal = false
+		a.exitErr = nil
+	}
+}
+
+func (a *app) setTransientError(message string) {
+	a.mode.Set(viewError)
+	a.errMessage.Set(message)
+	a.footerHint.Set("Press q or Enter to return")
+	a.fatal = false
+	a.exitErr = nil
+}
+
+func (a *app) setFatalError(err error, message string) {
+	a.mode.Set(viewError)
+	a.errMessage.Set(message)
+	a.footerHint.Set("Press q or Enter to exit")
+	a.fatal = true
+
+	if err != nil {
+		a.exitErr = err
+		return
+	}
+	a.exitErr = errors.New(message)
+}
+
+func (a *app) startBootstrap() {
 	go func() {
 		reporter := bootstrap.ProgressReporterFunc(func(event bootstrap.ProgressEvent) {
 			select {
@@ -145,329 +444,257 @@ func (a *App) startBootstrap() {
 		})
 
 		if _, err := bootstrap.EnsureDependenciesWithProgress(reporter); err != nil {
-			a.resultCh <- asyncResult{kind: asyncBootstrap, err: err}
+			a.emitResult(asyncResult{kind: asyncBootstrap, err: err})
 			return
 		}
 
 		stations, err := radio.FetchStationsFromPlaylist(a.playlistURL)
-		a.resultCh <- asyncResult{
+		a.emitResult(asyncResult{
 			kind:     asyncBootstrap,
 			stations: stations,
 			err:      err,
-		}
+		})
 	}()
 }
 
-func (a *App) startResolve(station radio.Station) {
-	a.mode = viewResolving
-	a.status = "Resolving direct stream URL"
-	a.footerHint = "Press q to cancel"
+func (a *app) startResolve(station radio.Station) {
+	token := a.resolveToken.Get() + 1
+	a.resolveToken.Set(token)
+	a.mode.Set(viewResolving)
+	a.status.Set("Resolving direct stream URL")
+	a.footerHint.Set("Press q to cancel")
+	a.errMessage.Set("")
 
-	go func(st radio.Station) {
+	go func(resolveToken int, st radio.Station) {
 		streamURL, err := radio.GetDirectAudioURL(st.VideoURL)
-		a.resultCh <- asyncResult{
-			kind:      asyncResolve,
-			station:   st,
-			streamURL: streamURL,
-			err:       err,
-		}
-	}(station)
+		a.emitResult(asyncResult{
+			kind:         asyncResolve,
+			station:      st,
+			streamURL:    streamURL,
+			resolveToken: resolveToken,
+			err:          err,
+		})
+	}(token, station)
 }
 
-func (a *App) handleResult(result asyncResult) error {
-	switch result.kind {
-	case asyncBootstrap:
-		if result.err != nil {
-			a.mode = viewError
-			a.errMessage = fmt.Sprintf("bootstrap failed: %v", result.err)
-			a.footerHint = "Press q to exit"
-			return nil
-		}
-
-		if len(result.stations) == 0 {
-			a.mode = viewError
-			a.errMessage = "no available stations found"
-			a.footerHint = "Press q to exit"
-			return nil
-		}
-
-		a.stations = result.stations
-		a.selectedIdx = 0
-		a.mode = viewSelect
-		a.status = "Select a station"
-		a.footerHint = "Enter play  Up/Down navigate  q quit"
-
-	case asyncResolve:
-		if result.err != nil {
-			a.mode = viewError
-			a.errMessage = fmt.Sprintf("stream resolution failed: %v", result.err)
-			a.footerHint = "Press q to go back"
-			return nil
-		}
-
-		if err := a.player.Play(result.streamURL); err != nil {
-			a.mode = viewError
-			a.errMessage = fmt.Sprintf("playback failed: %v", err)
-			a.footerHint = "Press q to go back"
-			return nil
-		}
-
-		a.currentStation = result.station
-		a.playing = true
-		a.paused = false
-		a.playStartedAt = time.Now()
-		a.totalPaused = 0
-		a.pausedStartedAt = time.Time{}
-		a.mode = viewPlayer
-		a.status = "Playing"
-		a.footerHint = "Space pause/resume  +/- volume  s stations  q quit"
-	}
-
-	return nil
-}
-
-func (a *App) handleKey(event inputEvent) bool {
-	if event.name == "ctrl_c" {
-		return true
-	}
-
-	switch a.mode {
-	case viewBoot:
-		if event.ch == 'q' || event.name == "escape" {
-			return true
-		}
-	case viewSelect:
-		return a.handleSelectKey(event)
-	case viewResolving:
-		if event.ch == 'q' || event.name == "escape" {
-			return true
-		}
-	case viewPlayer:
-		return a.handlePlayerKey(event)
-	case viewError:
-		if event.ch == 'q' || event.name == "enter" || event.name == "escape" {
-			if len(a.stations) > 0 {
-				a.mode = viewSelect
-				a.errMessage = ""
-				a.status = "Select a station"
-				a.footerHint = "Enter play  Up/Down navigate  q quit"
-				return false
-			}
-			return true
-		}
-	}
-
-	return false
-}
-
-func (a *App) handleSelectKey(event inputEvent) bool {
-	switch {
-	case event.name == "up" || event.ch == 'k' || event.ch == 'w':
-		if a.selectedIdx > 0 {
-			a.selectedIdx--
-		}
-	case event.name == "down" || event.ch == 'j':
-		if a.selectedIdx < len(a.stations)-1 {
-			a.selectedIdx++
-		}
-	case event.name == "enter":
-		if len(a.stations) == 0 {
-			return false
-		}
-		a.startResolve(a.stations[a.selectedIdx])
-	case event.ch == 'q' || event.name == "escape":
-		return true
-	}
-
-	return false
-}
-
-func (a *App) handlePlayerKey(event inputEvent) bool {
-	switch {
-	case event.name == "space" || event.ch == 'p':
-		if err := a.player.PauseToggle(); err == nil {
-			if a.paused {
-				a.paused = false
-				a.totalPaused += time.Since(a.pausedStartedAt)
-				a.pausedStartedAt = time.Time{}
-				a.status = "Playing"
-			} else {
-				a.paused = true
-				a.pausedStartedAt = time.Now()
-				a.status = "Paused"
-			}
-		}
-
-	case event.ch == '+' || event.ch == '=' || event.ch == '0':
-		vol, err := a.player.IncreaseVolume(5)
-		if err == nil {
-			a.volume = vol
-		}
-
-	case event.ch == '-' || event.ch == '_' || event.ch == '9':
-		vol, err := a.player.DecreaseVolume(5)
-		if err == nil {
-			a.volume = vol
-		}
-
-	case event.ch == 's':
-		a.mode = viewSelect
-		a.status = "Pick another station"
-		a.footerHint = "Enter play  Up/Down navigate  q quit"
-
-	case event.ch == 'q' || event.name == "escape":
-		return true
-	}
-
-	return false
-}
-
-func (a *App) render() string {
-	switch a.mode {
-	case viewBoot:
-		return a.renderBoot()
-	case viewSelect:
-		return a.renderSelector()
-	case viewResolving:
-		return a.renderResolving()
-	case viewPlayer:
-		return a.renderPlayer()
-	case viewError:
-		return a.renderError()
+func (a *app) emitResult(result asyncResult) {
+	select {
+	case a.resultCh <- result:
 	default:
-		return "Unknown view\n"
 	}
 }
 
-func (a *App) renderBoot() string {
-	var b strings.Builder
-	b.WriteString(colorText(" LOFI RADIO ", styleAccent))
-	b.WriteString("\n")
-	b.WriteString(colorText("Bootstrapping", styleMuted))
-	b.WriteString("\n\n")
+func (a *app) Render(ui *gotui.App) *gotui.Element {
+	_ = ui
 
-	b.WriteString(fmt.Sprintf("Status: %s\n", a.status))
-	if a.bootEvent.Type == bootstrap.ProgressEventDownload {
-		label := a.bootEvent.Component
+	root := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithHeightPercent(100),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Cyan)),
+		gotui.WithPadding(1),
+		gotui.WithGap(1),
+	)
+
+	root.AddChild(gotui.New(
+		gotui.WithText("LOFI RADIO"),
+		gotui.WithTextGradient(gotui.NewGradient(gotui.Cyan, gotui.Magenta).WithDirection(gotui.GradientHorizontal)),
+		gotui.WithTextStyle(gotui.NewStyle().Bold()),
+	))
+	root.AddChild(gotui.New(
+		gotui.WithText(a.modeLabel()),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+	root.AddChild(gotui.New(gotui.WithHR()))
+
+	content := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+	)
+	switch a.mode.Get() {
+	case viewBoot:
+		content.AddChild(a.renderBoot())
+	case viewSelect:
+		content.AddChild(a.renderSelector())
+	case viewResolving:
+		content.AddChild(a.renderResolving())
+	case viewPlayer:
+		content.AddChild(a.renderPlayer())
+	case viewError:
+		content.AddChild(a.renderError())
+	}
+	root.AddChild(content)
+
+	root.AddChild(gotui.New(gotui.WithHR()))
+	root.AddChild(gotui.New(
+		gotui.WithText(a.footerHint.Get()),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+
+	return root
+}
+
+func (a *app) renderBoot() *gotui.Element {
+	box := contentBox()
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("Status: %s", a.status.Get())),
+	))
+
+	event := a.bootEvent.Get()
+	if event.Type == bootstrap.ProgressEventDownload {
+		label := strings.ToUpper(strings.TrimSpace(event.Component))
 		if label == "" {
-			label = "download"
+			label = "DOWNLOAD"
 		}
-		bar := renderBar(a.bootEvent.Download.BytesReceived, a.bootEvent.Download.TotalBytes, 34)
-		speed := humanSpeed(a.bootEvent.Download.SpeedPerSec)
-		eta := humanDuration(a.bootEvent.Download.ETA)
-		b.WriteString(fmt.Sprintf("%s %s\n", strings.ToUpper(label), bar))
+
 		totalLabel := "unknown"
-		if a.bootEvent.Download.TotalBytes > 0 {
-			totalLabel = humanBytes(a.bootEvent.Download.TotalBytes)
+		if event.Download.TotalBytes > 0 {
+			totalLabel = humanBytes(event.Download.TotalBytes)
 		}
-		b.WriteString(fmt.Sprintf("Data  %s / %s\n", humanBytes(a.bootEvent.Download.BytesReceived), totalLabel))
-		b.WriteString(fmt.Sprintf("Speed %s | ETA %s\n", speed, eta))
+
+		box.AddChild(gotui.New(
+			gotui.WithText(fmt.Sprintf("%s %s", label, renderBar(event.Download.BytesReceived, event.Download.TotalBytes, 34))),
+		))
+		box.AddChild(gotui.New(
+			gotui.WithText(fmt.Sprintf("Data  %s / %s", humanBytes(event.Download.BytesReceived), totalLabel)),
+		))
+		box.AddChild(gotui.New(
+			gotui.WithText(fmt.Sprintf("Speed %s | ETA %s", humanSpeed(event.Download.SpeedPerSec), humanDuration(event.Download.ETA))),
+		))
 	} else {
-		b.WriteString("Waiting for progress data...\n")
+		box.AddChild(gotui.New(
+			gotui.WithText("Waiting for progress data..."),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
 	}
 
-	b.WriteString("\n")
-	b.WriteString(colorText(a.footerHint, styleMuted))
-	b.WriteString("\n")
-	return b.String()
+	return box
 }
 
-func (a *App) renderSelector() string {
-	var b strings.Builder
-	b.WriteString(colorText(" LOFI RADIO ", styleAccent))
-	b.WriteString("\n")
-	b.WriteString(colorText("Station Selection", styleMuted))
-	b.WriteString("\n\n")
+func (a *app) renderSelector() *gotui.Element {
+	box := contentBox()
+	stations := a.stations.Get()
+	selected := clamp(a.selected.Get(), 0, max(len(stations)-1, 0))
+
+	if len(stations) == 0 {
+		box.AddChild(gotui.New(
+			gotui.WithText("No stations available."),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
+		return box
+	}
 
 	start := 0
 	maxRows := 12
-	if a.selectedIdx >= maxRows {
-		start = a.selectedIdx - maxRows + 1
+	if selected >= maxRows {
+		start = selected - maxRows + 1
 	}
-	end := start + maxRows
-	if end > len(a.stations) {
-		end = len(a.stations)
-	}
+	end := min(start+maxRows, len(stations))
 
 	for i := start; i < end; i++ {
 		prefix := "  "
-		if i == a.selectedIdx {
-			prefix = colorText("▶ ", styleAccent)
+		rowStyle := gotui.NewStyle()
+		if i == selected {
+			prefix = "> "
+			rowStyle = rowStyle.Foreground(gotui.BrightWhite).Bold()
 		}
 
-		title := compactText(a.stations[i].Title, 68)
-		if i == a.selectedIdx {
-			b.WriteString(colorText(prefix+title, styleHighlight))
-		} else {
-			b.WriteString(prefix + title)
-		}
-		b.WriteString("\n")
+		row := fmt.Sprintf("%s%s", prefix, compactText(stations[i].Title, 68))
+		box.AddChild(gotui.New(
+			gotui.WithText(row),
+			gotui.WithTextStyle(rowStyle),
+		))
 	}
 
-	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("Station %d/%d\n", a.selectedIdx+1, len(a.stations)))
-	b.WriteString(colorText(a.footerHint, styleMuted))
-	b.WriteString("\n")
-	return b.String()
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("Station %d/%d", selected+1, len(stations))),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+
+	return box
 }
 
-func (a *App) renderResolving() string {
-	var b strings.Builder
-	b.WriteString(colorText(" LOFI RADIO ", styleAccent))
-	b.WriteString("\n")
-	b.WriteString(colorText("Preparing Stream", styleMuted))
-	b.WriteString("\n\n")
-	b.WriteString("Resolving direct audio URL from source...\n")
-	b.WriteString("This can take a few seconds depending on network conditions.\n")
-	b.WriteString("\n")
-	b.WriteString(colorText(a.footerHint, styleMuted))
-	b.WriteString("\n")
-	return b.String()
+func (a *app) renderResolving() *gotui.Element {
+	box := contentBox()
+	box.AddChild(gotui.New(
+		gotui.WithText("Resolving direct audio URL from source..."),
+	))
+	box.AddChild(gotui.New(
+		gotui.WithText("This can take a few seconds depending on network conditions."),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+	return box
 }
 
-func (a *App) renderPlayer() string {
-	var b strings.Builder
-	b.WriteString(colorText(" LOFI RADIO PLAYER ", styleAccent))
-	b.WriteString("\n")
-	b.WriteString(colorText("Now Playing", styleMuted))
-	b.WriteString("\n\n")
-
-	title := compactText(a.currentStation.Title, 72)
-	b.WriteString(fmt.Sprintf("Title   %s\n", title))
-	b.WriteString(fmt.Sprintf("Status  %s\n", a.status))
-
-	volBar := renderBar(int64(a.volume), 100, 24)
-	b.WriteString(fmt.Sprintf("Volume  %s %d%%\n", volBar, a.volume))
-
-	elapsed := a.playbackElapsed()
-	b.WriteString(fmt.Sprintf("Time    %s\n", elapsed))
-	b.WriteString("\n")
-	b.WriteString(colorText(a.footerHint, styleMuted))
-	b.WriteString("\n")
-	return b.String()
+func (a *app) renderPlayer() *gotui.Element {
+	box := contentBox()
+	station := a.currentStation.Get()
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("Title   %s", compactText(station.Title, 72))),
+	))
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("Status  %s", a.status.Get())),
+	))
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("Volume  %s %d%%", renderBar(int64(a.volume.Get()), 100, 24), a.volume.Get())),
+	))
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("Time    %s", a.playbackElapsed())),
+	))
+	return box
 }
 
-func (a *App) renderError() string {
-	var b strings.Builder
-	b.WriteString(colorText(" LOFI RADIO ", styleAccent))
-	b.WriteString("\n")
-	b.WriteString(colorText("Error", styleError))
-	b.WriteString("\n\n")
-	b.WriteString(a.errMessage)
-	b.WriteString("\n\n")
-	b.WriteString(colorText(a.footerHint, styleMuted))
-	b.WriteString("\n")
-	return b.String()
+func (a *app) renderError() *gotui.Element {
+	box := contentBox()
+	box.AddChild(gotui.New(
+		gotui.WithText("Error"),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Red).Bold()),
+	))
+	box.AddChild(gotui.New(
+		gotui.WithText(strings.TrimSpace(a.errMessage.Get())),
+	))
+	return box
 }
 
-func (a *App) playbackElapsed() string {
-	if a.playStartedAt.IsZero() {
+func contentBox() *gotui.Element {
+	return gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithBorder(gotui.BorderSingle),
+		gotui.WithPadding(1),
+		gotui.WithGap(1),
+	)
+}
+
+func (a *app) modeLabel() string {
+	switch a.mode.Get() {
+	case viewBoot:
+		return "Bootstrapping"
+	case viewSelect:
+		return "Station Selection"
+	case viewResolving:
+		return "Preparing Stream"
+	case viewPlayer:
+		return "Now Playing"
+	case viewError:
+		return "Error"
+	default:
+		return ""
+	}
+}
+
+func (a *app) playbackElapsed() string {
+	startedAt := a.playStartedAt.Get()
+	if startedAt.IsZero() {
 		return "00:00"
 	}
 
-	elapsed := time.Since(a.playStartedAt) - a.totalPaused
-	if a.paused {
-		elapsed = a.pausedStartedAt.Sub(a.playStartedAt) - a.totalPaused
+	elapsed := a.now.Get().Sub(startedAt) - a.totalPaused.Get()
+	if a.paused.Get() {
+		pausedAt := a.pausedStartedAt.Get()
+		if !pausedAt.IsZero() {
+			elapsed = pausedAt.Sub(startedAt) - a.totalPaused.Get()
+		}
 	}
 	if elapsed < 0 {
 		elapsed = 0
@@ -482,153 +709,6 @@ func (a *App) playbackElapsed() string {
 	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }
 
-func (a *App) captureInput() {
-	reader := os.Stdin
-	parser := &keyParser{}
-	buffer := make([]byte, 64)
-
-	for {
-		select {
-		case <-a.doneCh:
-			return
-		default:
-		}
-
-		readCount, err := reader.Read(buffer)
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
-			continue
-		}
-		if readCount == 0 {
-			continue
-		}
-
-		events := parser.feed(buffer[:readCount])
-		for _, ev := range events {
-			select {
-			case a.inputCh <- ev:
-			default:
-			}
-		}
-	}
-}
-
-type keyParser struct {
-	pending []byte
-}
-
-func (p *keyParser) feed(data []byte) []inputEvent {
-	p.pending = append(p.pending, data...)
-	events := make([]inputEvent, 0, len(data))
-
-	for len(p.pending) > 0 {
-		current := p.pending[0]
-
-		if current == 0x1b {
-			if len(p.pending) < 2 {
-				break
-			}
-			if p.pending[1] == '[' {
-				if len(p.pending) < 3 {
-					break
-				}
-				switch p.pending[2] {
-				case 'A':
-					events = append(events, inputEvent{name: "up"})
-				case 'B':
-					events = append(events, inputEvent{name: "down"})
-				case 'C':
-					events = append(events, inputEvent{name: "right"})
-				case 'D':
-					events = append(events, inputEvent{name: "left"})
-				default:
-					events = append(events, inputEvent{name: "escape"})
-				}
-				p.pending = p.pending[3:]
-				continue
-			}
-
-			events = append(events, inputEvent{name: "escape"})
-			p.pending = p.pending[1:]
-			continue
-		}
-
-		p.pending = p.pending[1:]
-		switch current {
-		case 3:
-			events = append(events, inputEvent{name: "ctrl_c"})
-		case '\r', '\n':
-			events = append(events, inputEvent{name: "enter"})
-		case ' ':
-			events = append(events, inputEvent{name: "space"})
-		default:
-			if current >= 32 && current <= 126 {
-				events = append(events, inputEvent{ch: rune(current)})
-			}
-		}
-	}
-
-	return events
-}
-
-type terminalSession struct {
-	in    *os.File
-	out   *os.File
-	state *term.State
-}
-
-func newTerminalSession(in, out *os.File) (*terminalSession, error) {
-	if !term.IsTerminal(int(in.Fd())) || !term.IsTerminal(int(out.Fd())) {
-		return nil, fmt.Errorf("interactive terminal required")
-	}
-
-	rawState, err := term.MakeRaw(int(in.Fd()))
-	if err != nil {
-		return nil, err
-	}
-
-	session := &terminalSession{
-		in:    in,
-		out:   out,
-		state: rawState,
-	}
-
-	_, _ = fmt.Fprint(out, "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l")
-	return session, nil
-}
-
-func (t *terminalSession) Close() {
-	if t == nil {
-		return
-	}
-
-	if t.state != nil {
-		_ = term.Restore(int(t.in.Fd()), t.state)
-	}
-
-	_, _ = fmt.Fprint(t.out, "\x1b[?25h\x1b[?1049l")
-}
-
-func (t *terminalSession) Render(content string) {
-	var out bytes.Buffer
-	out.WriteString("\x1b[H\x1b[2J")
-	out.WriteString(content)
-	_, _ = io.Copy(t.out, &out)
-}
-
-const (
-	styleAccent    = "36"
-	styleMuted     = "90"
-	styleHighlight = "97"
-	styleError     = "31"
-)
-
-func colorText(value, colorCode string) string {
-	return "\x1b[" + colorCode + "m" + value + "\x1b[0m"
-}
-
 func renderBar(current, total int64, width int) string {
 	if width < 4 {
 		width = 4
@@ -641,20 +721,9 @@ func renderBar(current, total int64, width int) string {
 		}
 	}
 
-	if current < 0 {
-		current = 0
-	}
-	if current > total {
-		current = total
-	}
-
+	current = clamp64(current, 0, total)
 	filled := int((float64(current) / float64(total)) * float64(width))
-	if filled < 0 {
-		filled = 0
-	}
-	if filled > width {
-		filled = width
-	}
+	filled = clamp(filled, 0, width)
 
 	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
 }
@@ -689,6 +758,7 @@ func humanDuration(d time.Duration) string {
 	if d <= 0 {
 		return "--:--"
 	}
+
 	totalSeconds := int(d.Seconds())
 	minutes := totalSeconds / 60
 	seconds := totalSeconds % 60
@@ -709,6 +779,45 @@ func compactText(value string, maxLen int) string {
 	if maxLen <= 3 {
 		return clean[:maxLen]
 	}
-
 	return clean[:maxLen-3] + "..."
 }
+
+func clamp(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func clamp64(value, minValue, maxValue int64) int64 {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+var (
+	_ gotui.AppBinder       = (*app)(nil)
+	_ gotui.KeyListener     = (*app)(nil)
+	_ gotui.WatcherProvider = (*app)(nil)
+)
