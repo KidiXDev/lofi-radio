@@ -40,17 +40,22 @@ type BinaryPaths struct {
 }
 
 func EnsureDependencies() (BinaryPaths, error) {
-	ytDlpPath, err := resolveYtDlpPath()
+	return EnsureDependenciesWithProgress(nil)
+}
+
+func EnsureDependenciesWithProgress(reporter ProgressReporter) (BinaryPaths, error) {
+	ytDlpPath, err := resolveYtDlpPath(reporter)
 	if err != nil {
 		return BinaryPaths{}, err
 	}
 
-	ffplayPath, err := resolveFFplayPath()
+	ffplayPath, err := resolveFFplayPath(reporter)
 	if err != nil {
 		return BinaryPaths{}, err
 	}
 
 	config.SetBinaryPaths(ytDlpPath, ffplayPath)
+	emitStatus(reporter, "dependencies", "Ready")
 
 	return BinaryPaths{
 		YtDlp:  ytDlpPath,
@@ -58,13 +63,15 @@ func EnsureDependencies() (BinaryPaths, error) {
 	}, nil
 }
 
-func resolveYtDlpPath() (string, error) {
+func resolveYtDlpPath(reporter ProgressReporter) (string, error) {
 	if hostPath := findExecutableInPath("yt-dlp"); hostPath != "" {
+		emitStatus(reporter, "yt-dlp", "Using system binary")
 		return hostPath, nil
 	}
 
 	localPath := config.YtDlpPath()
 	if ensureRunnableFile(localPath) {
+		emitStatus(reporter, "yt-dlp", "Using local cached binary")
 		return localPath, nil
 	}
 
@@ -73,15 +80,18 @@ func resolveYtDlpPath() (string, error) {
 		return "", err
 	}
 
-	if err := downloadBinary(downloadURL, localPath); err != nil {
+	emitStatus(reporter, "yt-dlp", "Downloading binary")
+	if err := downloadBinary(downloadURL, localPath, "yt-dlp", reporter); err != nil {
 		return "", fmt.Errorf("ensure yt-dlp binary: %w", err)
 	}
 
+	emitStatus(reporter, "yt-dlp", "Binary downloaded")
 	return localPath, nil
 }
 
-func resolveFFplayPath() (string, error) {
+func resolveFFplayPath(reporter ProgressReporter) (string, error) {
 	if hostFFplay := findExecutableInPath("ffplay"); hostFFplay != "" {
+		emitStatus(reporter, "ffplay", "Using system binary")
 		return hostFFplay, nil
 	}
 
@@ -89,16 +99,19 @@ func resolveFFplayPath() (string, error) {
 	if hostFFmpeg != "" {
 		hostFFplayFromFFmpeg := filepath.Join(filepath.Dir(hostFFmpeg), ffplayFileName())
 		if isRunnableFile(hostFFplayFromFFmpeg) {
+			emitStatus(reporter, "ffplay", "Using ffplay from system ffmpeg")
 			return hostFFplayFromFFmpeg, nil
 		}
 	}
 
 	localFFplayPath := config.FFplayPath()
 	if ensureRunnableFile(localFFplayPath) {
+		emitStatus(reporter, "ffplay", "Using local cached binary")
 		return localFFplayPath, nil
 	}
 
-	if err := ensurePortableFFmpeg(filepath.Dir(localFFplayPath)); err != nil {
+	emitStatus(reporter, "ffplay", "Downloading ffmpeg bundle")
+	if err := ensurePortableFFmpeg(filepath.Dir(localFFplayPath), reporter); err != nil {
 		return "", fmt.Errorf("ensure ffmpeg/ffplay binaries: %w", err)
 	}
 
@@ -106,6 +119,7 @@ func resolveFFplayPath() (string, error) {
 		return "", fmt.Errorf("ffplay binary not found after download: %s", localFFplayPath)
 	}
 
+	emitStatus(reporter, "ffplay", "Binary downloaded")
 	return localFFplayPath, nil
 }
 
@@ -159,7 +173,7 @@ func ffmpegDownloadURL() (string, error) {
 	}
 }
 
-func ensurePortableFFmpeg(destinationDir string) error {
+func ensurePortableFFmpeg(destinationDir string, reporter ProgressReporter) error {
 	if err := os.MkdirAll(destinationDir, 0o755); err != nil {
 		return fmt.Errorf("create ffmpeg directory: %w", err)
 	}
@@ -182,7 +196,7 @@ func ensurePortableFFmpeg(destinationDir string) error {
 	}
 	defer os.Remove(tempArchivePath)
 
-	if err := downloadBinary(downloadURL, tempArchivePath); err != nil {
+	if err := downloadBinary(downloadURL, tempArchivePath, "ffmpeg", reporter); err != nil {
 		return fmt.Errorf("download ffmpeg archive: %w", err)
 	}
 
@@ -376,7 +390,7 @@ func safeJoinPath(baseDir, relativePath string) (string, error) {
 	return target, nil
 }
 
-func downloadBinary(url, destination string) error {
+func downloadBinary(url, destination, component string, reporter ProgressReporter) error {
 	response, err := downloadHTTPClient.Get(url)
 	if err != nil {
 		return fmt.Errorf("download request failed: %w", err)
@@ -397,14 +411,69 @@ func downloadBinary(url, destination string) error {
 		return fmt.Errorf("create temporary destination file: %w", err)
 	}
 
-	if _, err := io.Copy(target, response.Body); err != nil {
-		_ = target.Close()
-		return fmt.Errorf("write downloaded binary: %w", err)
+	startedAt := time.Now()
+	lastReportAt := startedAt
+	totalBytes := response.ContentLength
+	var writtenBytes int64
+	buffer := make([]byte, 64*1024)
+
+	reportDownload := func(done bool) {
+		elapsed := time.Since(startedAt)
+		elapsedSeconds := elapsed.Seconds()
+		if elapsedSeconds < 0.001 {
+			elapsedSeconds = 0.001
+		}
+
+		speed := float64(writtenBytes) / elapsedSeconds
+		var eta time.Duration
+		if totalBytes > 0 && writtenBytes < totalBytes && speed > 0 {
+			remaining := float64(totalBytes-writtenBytes) / speed
+			eta = time.Duration(remaining * float64(time.Second))
+		}
+
+		emitDownload(reporter, component, DownloadProgress{
+			BytesReceived: writtenBytes,
+			TotalBytes:    totalBytes,
+			SpeedPerSec:   speed,
+			ETA:           eta,
+			Done:          done,
+		})
+	}
+
+	for {
+		readCount, readErr := response.Body.Read(buffer)
+		if readCount > 0 {
+			writeCount, writeErr := target.Write(buffer[:readCount])
+			if writeErr != nil {
+				_ = target.Close()
+				return fmt.Errorf("write downloaded binary: %w", writeErr)
+			}
+			if writeCount != readCount {
+				_ = target.Close()
+				return fmt.Errorf("write downloaded binary: short write")
+			}
+
+			writtenBytes += int64(writeCount)
+			if time.Since(lastReportAt) >= 120*time.Millisecond {
+				reportDownload(false)
+				lastReportAt = time.Now()
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			_ = target.Close()
+			return fmt.Errorf("read download stream: %w", readErr)
+		}
 	}
 
 	if err := target.Close(); err != nil {
 		return fmt.Errorf("close downloaded binary: %w", err)
 	}
+
+	reportDownload(true)
 
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(tempDestination, 0o755); err != nil {
@@ -500,6 +569,30 @@ func ensureRunnableFile(path string) bool {
 	}
 
 	return refreshedInfo.Mode()&0o111 != 0
+}
+
+func emitStatus(reporter ProgressReporter, component, message string) {
+	if reporter == nil {
+		return
+	}
+
+	reporter.ReportProgress(ProgressEvent{
+		Type:      ProgressEventStatus,
+		Component: component,
+		Message:   message,
+	})
+}
+
+func emitDownload(reporter ProgressReporter, component string, progress DownloadProgress) {
+	if reporter == nil {
+		return
+	}
+
+	reporter.ReportProgress(ProgressEvent{
+		Type:      ProgressEventDownload,
+		Component: component,
+		Download:  progress,
+	})
 }
 
 func ffplayFileName() string {

@@ -8,11 +8,12 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 
 ## ✨ Features
 
-- **Instant Streaming**: Play curated lofi beats without opening a browser.
-- **Auto-Discovery**: Fetches the latest live streams and videos from a central playlist.
-- **Smart Dependency Bootstrap**: Uses host-installed `ffmpeg`/`yt-dlp` when available, otherwise auto-downloads portable binaries into `bin/`.
-- **Lightweight**: Minimal CPU and memory footprint compared to web browsers.
-- **Terminal UI**: Simple and intuitive command-line interaction.
+- **Interactive Full-Screen TUI**: Clean station picker and now-playing screen that restores your terminal cleanly on exit.
+- **Bootstrap Progress View**: Shows live dependency download progress, transfer speed, and ETA when binaries need to be fetched.
+- **Music-Player Controls**: Pause/resume, volume up/down, station switching, and playback elapsed time in one lightweight interface.
+- **Auto-Discovery**: Fetches currently available stations from the configured YouTube playlist.
+- **Smart Dependency Bootstrap**: Uses host-installed `ffplay`/`yt-dlp` first, then falls back to local portable binaries in `bin/`.
+- **Lightweight**: Minimal CPU and memory footprint compared to browser-based playback.
 
 ## 🚀 Getting Started
 
@@ -39,6 +40,15 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
    go build -o lofi-radio main.go
    ./lofi-radio
    ```
+
+## ⌨ Controls
+
+- `↑/↓` or `k/j`: Move through station list
+- `Enter`: Play selected station
+- `Space` or `p`: Pause/resume playback
+- `+` / `-`: Volume up/down
+- `s`: Switch station while playing
+- `q` or `Esc`: Quit
 
 ## 🛠️ How it Works
 
