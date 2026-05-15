@@ -10,7 +10,7 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 
 - **Instant Streaming**: Play curated lofi beats without opening a browser.
 - **Auto-Discovery**: Fetches the latest live streams and videos from a central playlist.
-- **Zero Configuration**: Bundled with all necessary binaries (`ffmpeg`, `yt-dlp`) for Windows and Linux.
+- **Smart Dependency Bootstrap**: Uses host-installed `ffmpeg`/`yt-dlp` when available, otherwise auto-downloads portable binaries into `bin/`.
 - **Lightweight**: Minimal CPU and memory footprint compared to web browsers.
 - **Terminal UI**: Simple and intuitive command-line interaction.
 
@@ -45,6 +45,7 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 The application uses a modular architecture:
 - **`internal/radio`**: Handles playlist parsing, station selection, and audio stream extraction.
 - **`internal/utils`**: Core execution utilities for handling external processes.
+- **`internal/bootstrap`**: Resolves and bootstraps external binaries (`yt-dlp`, `ffmpeg/ffplay`).
 
 ### Dependencies
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp): For extracting audio streams from YouTube.
@@ -54,9 +55,9 @@ The application uses a modular architecture:
 
 ```text
 .
-├── bin/            # Bundled binaries (ffmpeg, yt-dlp)
-│   ├── linux/      # Linux-specific binaries
-│   └── win/        # Windows-specific binaries (.exe)
+├── bin/            # Auto-created portable binaries (if host tools are missing)
+│   ├── ffmpeg/     # ffmpeg/ffplay binaries
+│   └── ytdlp/      # yt-dlp binary
 ├── internal/       # Core application logic
 │   ├── config/     # Configuration & paths
 │   ├── radio/      # Streaming & Playlist logic
