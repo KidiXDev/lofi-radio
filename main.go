@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/kidixdev/lofi-radio/internal/bootstrap"
 	"github.com/kidixdev/lofi-radio/internal/config"
 	"github.com/kidixdev/lofi-radio/internal/radio"
 	"os"
@@ -10,6 +11,14 @@ import (
 func main() {
 	fmt.Println("Lofi Radio Player")
 	fmt.Println("=================")
+	fmt.Println("Checking dependencies...")
+
+	_, err := bootstrap.EnsureDependencies()
+	if err != nil {
+		fmt.Println("Dependency setup failed:", err)
+		os.Exit(1)
+	}
+
 	fmt.Println("Loading currently available radios...")
 
 	stations, err := radio.FetchStationsFromPlaylist(config.PlaylistURL)
