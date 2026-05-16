@@ -6,8 +6,9 @@ import (
 )
 
 var (
-	ytDlpPath  = defaultYtDlpPath()
-	ffplayPath = defaultFFplayPath()
+	ytDlpPath   = defaultYtDlpPath()
+	ffplayPath  = defaultFFplayPath()
+	ffmpegPath  = defaultFFmpegPath()
 )
 
 func SetBinaryPaths(ytDlp, ffplay string) {
@@ -17,6 +18,13 @@ func SetBinaryPaths(ytDlp, ffplay string) {
 
 	if ffplay != "" {
 		ffplayPath = ffplay
+		// Derive ffmpeg sibling from ffplay path.
+		dir := filepath.Dir(ffplay)
+		base := "ffmpeg"
+		if runtime.GOOS == "windows" {
+			base = "ffmpeg.exe"
+		}
+		ffmpegPath = filepath.Join(dir, base)
 	}
 }
 
@@ -26,6 +34,17 @@ func YtDlpPath() string {
 
 func FFplayPath() string {
 	return ffplayPath
+}
+
+func FFmpegPath() string {
+	return ffmpegPath
+}
+
+func defaultFFmpegPath() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join("bin", "ffmpeg", "win", "ffmpeg.exe")
+	}
+	return filepath.Join("bin", "ffmpeg", "linux", "ffmpeg")
 }
 
 func defaultYtDlpPath() string {

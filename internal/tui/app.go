@@ -69,6 +69,12 @@ type app struct {
 	wavePhase    *gotui.State[float64]
 	pulsePhase   *gotui.State[float64]
 	aniTick      int
+	vizLiveHold  int
+	vizRecoverAt time.Time
+
+	// vizBands holds the smoothed per-band amplitudes updated by onTick.
+	// Plain array (not State) — only accessed from the UI goroutine.
+	vizBands [radio.NumBands]float64
 
 	resolveToken *gotui.State[int]
 	bootCh       chan bootstrap.ProgressEvent
@@ -292,11 +298,15 @@ func (a *app) onTick() {
 	if a.aniTick%3 == 0 {
 		a.spinnerFrame.Update(func(v int) int { return v + 1 })
 	}
-	// Keep animation speeds similar to previous behavior while increasing frame rate.
 	a.wavePhase.Update(func(v float64) float64 { return v + 0.029 })
 	a.pulsePhase.Update(func(v float64) float64 { return v + 0.0165 })
 
 	if a.mode.Get() != viewPlayer || !a.playing.Get() {
+		// Decay vizBands to zero when not in player mode.
+		for b := range a.vizBands {
+			a.vizBands[b] *= 0.85
+		}
+		a.vizLiveHold = 0
 		return
 	}
 
@@ -310,7 +320,49 @@ func (a *app) onTick() {
 	if !a.paused.Get() {
 		a.now.Set(time.Now())
 	}
+
+	// Analyzer restart is handled in radio.Player capture loop.
+	// UI must not force restarts, which can interrupt otherwise healthy flow.
+
+	// Keep "live spectrum" sticky across brief PCM analyzer gaps to avoid
+	// rapid buffering/live toggling when audio output itself is stable.
+	if a.paused.Get() {
+		a.vizLiveHold = 0
+	} else if a.player.Viz.IsActive() && a.player.Viz.IsFresh(1200*time.Millisecond) {
+		a.vizLiveHold = 90 // ~3s at 33ms tick
+	} else if a.vizLiveHold > 0 {
+		a.vizLiveHold--
+	}
+
+	// --- Visualizer smoothing (wall-clock based, runs at steady 30 fps) ---
+	// Sample the latest raw bands from the analysis goroutine.
+	raw := a.player.Viz.Get()
+	paused := a.paused.Get()
+
+	const (
+		attack     = 0.80 // how fast bars rise  (per 33ms tick)
+		decayPlay  = 0.88 // how fast bars fall while playing
+		decayPause = 0.92 // slower decay when paused (visual idle)
+	)
+
+	decay := decayPlay
+	if paused {
+		decay = decayPause
+	}
+
+	for b := 0; b < radio.NumBands; b++ {
+		target := raw[b]
+		if paused {
+			target = 0 // decay to flat when paused
+		}
+		if target > a.vizBands[b] {
+			a.vizBands[b] += attack * (target - a.vizBands[b])
+		} else {
+			a.vizBands[b] *= decay
+		}
+	}
 }
+
 
 func (a *app) handleQuitOrBack(ke gotui.KeyEvent) {
 	switch a.mode.Get() {
@@ -970,43 +1022,128 @@ func (a *app) renderPlayer() *gotui.Element {
 	return row
 }
 
-// buildWaveVisualizer renders an animated ASCII frequency-bar visualizer.
-// Bar count adapts: use a reasonable default (20) that fits narrow terminals.
+// vizRows controls how many text rows the spectrum occupies.
+const vizRows = 6
+
+// buildWaveVisualizer renders a real audio-reactive multi-row spectrum analyzer.
+// a.vizBands contains the smoothed band amplitudes, updated every onTick (30fps).
+// Falls back to an animated sine-wave placeholder while buffering.
 func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 	phase := a.wavePhase.Get()
-	numBars := 30
-	barChars := []string{" ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+	numBars := radio.NumBands
 
-	row := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+	// Show buffering only until first analyzer frame is observed.
+	// After data exists, keep live spectrum even across brief gaps.
+	hasRealData := !paused && (a.player.Viz.HasData() || a.vizLiveHold > 0)
+
+	// Compute per-bar display height.
+	heights := make([]float64, numBars)
+	for i := 0; i < numBars; i++ {
+		if paused {
+			heights[i] = a.vizBands[i] // decayed by onTick
+		} else if hasRealData {
+			heights[i] = a.vizBands[i]
+		} else {
+			// Animated sine-wave placeholder while buffering.
+			h := 0.45 +
+				0.30*math.Sin(float64(i)*0.55+phase) +
+				0.15*math.Sin(float64(i)*1.2+phase*1.6) +
+				0.08*math.Sin(float64(i)*2.0+phase*2.2)
+			if h < 0 {
+				h = 0
+			}
+			if h > 1 {
+				h = 1
+			}
+			heights[i] = h
+		}
+	}
+
+	// Block characters used for each row's fill level.
+	// Each row represents 1/vizRows of the full height.
+	// sub-row fill chars: 0=empty, 1-8=partial bottom→top.
+	subFill := []string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+
+	col := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithGap(0),
 	)
 
-	for i := 0; i < numBars; i++ {
-		var height float64
-		if paused {
-			height = 0.08 + 0.04*math.Sin(float64(i)*0.9)
-		} else {
-			height = 0.5 +
-				0.28*math.Sin(float64(i)*0.55+phase) +
-				0.14*math.Sin(float64(i)*1.2+phase*1.6) +
-				0.08*math.Sin(float64(i)*2.0+phase*2.2)
-			if height < 0 {
-				height = 0
+	// Build rows top→bottom. Row 0 is the top.
+	for row := vizRows - 1; row >= 0; row-- {
+		// This row covers height band [row/vizRows, (row+1)/vizRows].
+		rowLo := float64(row) / float64(vizRows)
+		rowHi := float64(row+1) / float64(vizRows)
+		_ = rowHi
+
+		hLine := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(0),
+		)
+
+		for i := 0; i < numBars; i++ {
+			h := heights[i]
+			var ch string
+			if h <= rowLo {
+				// Bar doesn't reach this row.
+				ch = " "
+			} else if h >= float64(row+1)/float64(vizRows) {
+				// Full block.
+				ch = "█"
+			} else {
+				// Partial: how far into this row.
+				frac := (h - rowLo) * float64(vizRows)
+				idx := clamp(int(frac*float64(len(subFill)-1)), 0, len(subFill)-1)
+				ch = subFill[idx]
 			}
-			if height > 1 {
-				height = 1
+
+			// Hue: low bars cyan→blue, high bars yellow→red.
+			// Position hue by bar index + height for lively color.
+			barFrac := float64(i) / float64(numBars)
+			rowFrac := float64(row) / float64(vizRows)
+			hue := 200 - barFrac*80 + heights[i]*120 + rowFrac*40
+			hue = math.Mod(hue+phase*8, 360)
+			if hue < 0 {
+				hue += 360
 			}
+			sat := 0.85 + 0.15*heights[i]
+			lit := 0.45 + 0.2*heights[i]
+			if ch == " " {
+				lit = 0.08 // dim empty cells
+				sat = 0.2
+				ch = "·" // subtle dot grid
+			}
+			r, g, b := hslToRGB(hue, sat, lit)
+
+			hLine.AddChild(gotui.New(
+				gotui.WithText(ch),
+				gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(r, g, b))),
+			))
 		}
-		barIdx := clamp(int(height*float64(len(barChars)-1)), 0, len(barChars)-1)
-		hue := math.Mod(float64(i)*12+phase*30, 360)
-		r, g, b := hslToRGB(hue, 0.9, 0.6)
-		row.AddChild(gotui.New(
-			gotui.WithText(barChars[barIdx]),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(r, g, b))),
-		))
+		col.AddChild(hLine)
 	}
-	return row
+
+	// Bottom label row.
+	labelRow := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithGap(0),
+	)
+	var labelText string
+	if paused {
+		labelText = "  ─── PAUSED ───"
+	} else if hasRealData {
+		labelText = "  ♫ LIVE SPECTRUM"
+	} else {
+		labelText = "  ⌛ BUFFERING..."
+	}
+	labelRow.AddChild(gotui.New(
+		gotui.WithText(labelText),
+		gotui.WithWrap(false),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+	col.AddChild(labelRow)
+
+	return col
 }
 
 func (a *app) renderError() *gotui.Element {
