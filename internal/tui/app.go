@@ -1023,12 +1023,6 @@ func (a *app) renderPlayer() *gotui.Element {
 		gotui.WithPadding(2),
 	)
 
-	rightCol.AddChild(gotui.New(
-		gotui.WithText("VISUALIZER"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-	))
-	rightCol.AddChild(gotui.New(gotui.WithHR()))
-
 	visualizerBox := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithPaddingTRBL(2, 0, 0, 0),
@@ -1143,26 +1137,6 @@ func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 		}
 		col.AddChild(hLine)
 	}
-
-	// Bottom label row.
-	labelRow := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(0),
-	)
-	var labelText string
-	if paused {
-		labelText = "  ─── PAUSED ───"
-	} else if hasRealData {
-		labelText = "  ♫ LIVE SPECTRUM"
-	} else {
-		labelText = "  ⌛ BUFFERING..."
-	}
-	labelRow.AddChild(gotui.New(
-		gotui.WithText(labelText),
-		gotui.WithWrap(false),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-	col.AddChild(labelRow)
 
 	return col
 }
