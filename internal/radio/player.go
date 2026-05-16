@@ -2,6 +2,7 @@ package radio
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,10 +16,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hajimehoshi/oto"
 	"github.com/kidixdev/lofi-radio/internal/config"
 )
 
 var errPlayerNotRunning = errors.New("player is not running")
+var preferredPCMProfile atomic.Value // string
+
+type pcmProfile struct {
+	name          string
+	withReconnect bool
+	strictMap     bool
+}
 
 // NumBands is the number of frequency bands exposed to the visualizer.
 const NumBands = 32
@@ -79,15 +88,23 @@ func (v *VisualizerBands) HasData() bool {
 type Player struct {
 	mu        sync.Mutex
 	cmd       *exec.Cmd
-	stdin     io.WriteCloser
 	waitCh    chan error
 	volume    int
 	streamURL string
+	stopCh    chan struct{}
 
-	pcmCancel chan struct{}
+	audioCtx     *oto.Context
+	audioPlayer  PCMPlayer
+	pauseFlag    int32
+	ffmpegStderr *bytes.Buffer
 
 	// Viz is the exported visualizer state the TUI reads every frame.
 	Viz VisualizerBands
+}
+
+type PCMPlayer interface {
+	io.Writer
+	Close() error
 }
 
 func NewPlayer(initialVolume int) *Player {
@@ -114,123 +131,215 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 		writeLog("player.play.start volume=%d", volume)
 	}
 
-	// ── Main audio via ffplay ────────────────────────────────────────────────
-	cmd := exec.Command(
-		config.FFplayPath(),
-		"-nodisp",
-		"-autoexit",
-		"-loglevel", "error",
-		"-volume", strconv.Itoa(clampVolume(volume)),
-		streamURL,
-	)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	ctx, err := oto.NewContext(pcmSampleRate, pcmChannels, 2, pcmChunkBytes*4)
+	if err != nil {
+		return fmt.Errorf("create audio context: %w", err)
+	}
 
-	stdinPipe, err := cmd.StdinPipe()
+	ffmpeg, stdout, ffmpegStderr, err := startPCMFFmpegWithFallback(streamURL)
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
-		writeLog("player.play.ffplay_start_error err=%v", err)
-		return err
+	if ffmpeg.Process != nil {
+		writeLog("player.play.ffmpeg_started pid=%d", ffmpeg.Process.Pid)
 	}
-	writeLog("player.play.ffplay_started pid=%d", cmd.Process.Pid)
 
+	audioPlayer := ctx.NewPlayer()
 	waitCh := make(chan error, 1)
+	stopCh := make(chan struct{})
+	atomic.StoreInt32(&p.pauseFlag, 0)
+
 	go func() {
-		waitCh <- cmd.Wait()
+		atomic.StoreInt32(&p.Viz.active, 1)
+		defer atomic.StoreInt32(&p.Viz.active, 0)
+		defer func() { _ = audioPlayer.Close() }()
+
+		currentCmd := ffmpeg
+		currentStream := stdout
+		currentStderr := ffmpegStderr
+		restarts := 0
+
+		for {
+			if isStopped(stopCh) {
+				if currentCmd != nil && currentCmd.Process != nil {
+					_ = currentCmd.Process.Kill()
+				}
+				if currentCmd != nil {
+					_ = currentCmd.Wait()
+				}
+				waitCh <- nil
+				break
+			}
+
+			err := p.runPCMPipeline(currentStream, audioPlayer)
+			waitErr := currentCmd.Wait()
+			if isStopped(stopCh) {
+				waitCh <- nil
+				break
+			}
+
+			// Any EOF / ffmpeg exit during live playback is treated as transient:
+			// attempt fast restart on the same stream URL.
+			restarts++
+			writeLog("player.play.restart attempt=%d err=%v wait_err=%v", restarts, err, waitErr)
+			time.Sleep(450 * time.Millisecond)
+
+			nextCmd, nextStream, nextStderr, startErr := startPCMFFmpegWithFallback(streamURL)
+			if startErr != nil {
+				waitCh <- fmt.Errorf("restart stream failed after %d attempts: %w", restarts, startErr)
+				break
+			}
+
+			p.mu.Lock()
+			p.cmd = nextCmd
+			p.ffmpegStderr = nextStderr
+			p.mu.Unlock()
+
+			currentCmd = nextCmd
+			currentStream = nextStream
+			currentStderr = nextStderr
+			_ = currentStderr
+		}
 		close(waitCh)
 	}()
 
 	p.mu.Lock()
-	p.cmd = cmd
-	p.stdin = stdinPipe
+	p.cmd = ffmpeg
 	p.waitCh = waitCh
 	p.volume = clampVolume(volume)
 	p.streamURL = streamURL
+	p.stopCh = stopCh
+	p.audioCtx = ctx
+	p.audioPlayer = audioPlayer
+	p.ffmpegStderr = ffmpegStderr
 	p.mu.Unlock()
 
-	// ── Parallel PCM capture for visualizer ─────────────────────────────────
-	p.startPCMCapture(streamURL)
 	return nil
 }
 
-// startPCMCapture launches a secondary ffmpeg that pipes raw PCM to the
-// analysis goroutine.
-func (p *Player) startPCMCapture(streamURL string) {
-	cancel := make(chan struct{})
-	p.mu.Lock()
-	p.pcmCancel = cancel
-	p.mu.Unlock()
-
-	atomic.StoreInt32(&p.Viz.active, 1)
-
-	go func() {
-		defer atomic.StoreInt32(&p.Viz.active, 0)
-		writeLog("viz.capture.start")
-		type pcmProfile struct {
-			name          string
-			withReconnect bool
-			strictMap     bool
+func startPCMFFmpegWithFallback(streamURL string) (*exec.Cmd, io.Reader, *bytes.Buffer, error) {
+	profiles := []pcmProfile{
+		{name: "reconnect+strict", withReconnect: true, strictMap: true},
+		{name: "reconnect+auto_map", withReconnect: true, strictMap: false},
+		{name: "plain+strict", withReconnect: false, strictMap: true},
+		{name: "plain+auto_map", withReconnect: false, strictMap: false},
+	}
+	// On YouTube HLS URLs, plain+auto_map is typically the fastest successful probe.
+	profiles = prioritizeProfiles(profiles, "plain+auto_map")
+	if raw := preferredPCMProfile.Load(); raw != nil {
+		if lastGood, ok := raw.(string); ok && lastGood != "" {
+			profiles = prioritizeProfiles(profiles, lastGood)
 		}
-		profiles := []pcmProfile{
-			{name: "plain+auto_map", withReconnect: false, strictMap: false},
-			{name: "plain+strict", withReconnect: false, strictMap: true},
-			{name: "reconnect+auto_map", withReconnect: true, strictMap: false},
-			{name: "reconnect+strict", withReconnect: true, strictMap: true},
+	}
+
+	var lastErr error
+	for _, profile := range profiles {
+		ffmpeg, stdout, stderrBuf, err := startPCMFFmpeg(streamURL, profile.withReconnect, profile.strictMap)
+		if err != nil {
+			lastErr = err
+			writeLog("player.play.ffmpeg_profile_failed profile=%q err=%v", profile.name, err)
+			continue
 		}
 
-		attempt := 0
-		for {
-			select {
-			case <-cancel:
-				return
-			default:
+		// Probe first PCM bytes so we don't keep a "running" process that never emits audio.
+		probeBytes, probeErr := readFirstPCMChunk(stdout, ffmpeg, 8*time.Second)
+		if probeErr != nil {
+			lastErr = probeErr
+			msg := ""
+			if stderrBuf != nil {
+				msg = strings.TrimSpace(stderrBuf.String())
 			}
-
-			profile := profiles[attempt%len(profiles)]
-			attempt++
-
-			ffmpeg, stdout, err := startPCMFFmpeg(streamURL, profile.withReconnect, profile.strictMap)
-			if err != nil {
-				writeLog("viz.capture.profile_failed profile=%q err=%v", profile.name, err)
-				time.Sleep(800 * time.Millisecond)
-				continue
-			}
-			if ffmpeg.Process != nil {
-				writeLog("viz.capture.started pid=%d profile=%q", ffmpeg.Process.Pid, profile.name)
-			}
-
-			// Terminate ffmpeg when cancelled.
-			doneKill := make(chan struct{})
-			go func(cmd *exec.Cmd) {
-				defer close(doneKill)
-				<-cancel
-				if cmd.Process != nil {
-					_ = cmd.Process.Kill()
-				}
-			}(ffmpeg)
-
-			p.runPCMAnalysis(stdout, cancel)
-			waitErr := ffmpeg.Wait()
-			<-doneKill
-			if waitErr != nil {
-				writeLog("viz.capture.ffmpeg_exit_err profile=%q err=%v", profile.name, waitErr)
+			if msg != "" {
+				writeLog("player.play.ffmpeg_profile_probe_failed profile=%q err=%v stderr=%q", profile.name, probeErr, msg)
 			} else {
-				writeLog("viz.capture.ffmpeg_exit_ok profile=%q", profile.name)
+				writeLog("player.play.ffmpeg_profile_probe_failed profile=%q err=%v", profile.name, probeErr)
 			}
-
-			select {
-			case <-cancel:
-				return
-			default:
-			}
-			time.Sleep(500 * time.Millisecond)
+			continue
 		}
-	}()
+
+		writeLog("player.play.ffmpeg_profile_ok profile=%q first_chunk=%d", profile.name, len(probeBytes))
+		preferredPCMProfile.Store(profile.name)
+		stream := io.MultiReader(bytes.NewReader(probeBytes), stdout)
+		return ffmpeg, stream, stderrBuf, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("unable to start ffmpeg")
+	}
+	return nil, nil, nil, lastErr
 }
 
-func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec.Cmd, io.ReadCloser, error) {
+func prioritizeProfiles(profiles []pcmProfile, preferred string) []pcmProfile {
+	if preferred == "" || len(profiles) < 2 {
+		return profiles
+	}
+	idx := -1
+	for i, p := range profiles {
+		if p.name == preferred {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return profiles
+	}
+	out := make([]pcmProfile, 0, len(profiles))
+	out = append(out, profiles[idx])
+	out = append(out, profiles[:idx]...)
+	out = append(out, profiles[idx+1:]...)
+	return out
+}
+
+func readFirstPCMChunk(stdout io.ReadCloser, ffmpeg *exec.Cmd, timeout time.Duration) ([]byte, error) {
+	type probeResult struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan probeResult, 1)
+	go func() {
+		buf := make([]byte, pcmChunkBytes)
+		n, err := io.ReadAtLeast(stdout, buf, 2)
+		if n > 0 {
+			out := make([]byte, n)
+			copy(out, buf[:n])
+			ch <- probeResult{data: out, err: err}
+			return
+		}
+		ch <- probeResult{err: err}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	select {
+	case res := <-ch:
+		if res.err != nil && !errors.Is(res.err, io.EOF) && !errors.Is(res.err, io.ErrUnexpectedEOF) {
+			if ffmpeg.Process != nil {
+				_ = ffmpeg.Process.Kill()
+			}
+			_ = ffmpeg.Wait()
+			return nil, res.err
+		}
+		if len(res.data) < 2 {
+			if ffmpeg.Process != nil {
+				_ = ffmpeg.Process.Kill()
+			}
+			_ = ffmpeg.Wait()
+			if res.err != nil {
+				return nil, res.err
+			}
+			return nil, io.EOF
+		}
+		return res.data, nil
+	case <-ctx.Done():
+		if ffmpeg.Process != nil {
+			_ = ffmpeg.Process.Kill()
+		}
+		_ = ffmpeg.Wait()
+		return nil, fmt.Errorf("no PCM received within %s", timeout)
+	}
+}
+
+func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec.Cmd, io.ReadCloser, *bytes.Buffer, error) {
 	args := []string{
 		"-loglevel", "error",
 		"-nostdin",
@@ -242,6 +351,8 @@ func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec
 		"-max_delay", "0",
 		"-max_probe_packets", "1",
 		"-rw_timeout", "15000000",
+		"-reconnect_on_network_error", "1",
+		"-reconnect_on_http_error", "4xx,5xx",
 		"-probesize", "32k",
 		"-analyzeduration", "0",
 	}
@@ -268,23 +379,23 @@ func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec
 	ffmpeg := exec.Command(config.FFmpegPath(), args...)
 	stdout, err := ffmpeg.StdoutPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	var stderr bytes.Buffer
-	ffmpeg.Stderr = &stderr
+	stderr := &bytes.Buffer{}
+	ffmpeg.Stderr = stderr
 	if err := ffmpeg.Start(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {
-			return nil, nil, fmt.Errorf("%w: %s", err, msg)
+			return nil, nil, nil, fmt.Errorf("%w: %s", err, msg)
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return ffmpeg, stdout, nil
+	return ffmpeg, stdout, stderr, nil
 }
 
 // runPCMAnalysis uses chunk-based amplitude/delta bins (reference logic style)
 // instead of FFT, which is more tolerant for unstable live HLS chunks.
-func (p *Player) runPCMAnalysis(r io.Reader, cancel chan struct{}) {
+func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 	const (
 		bytesPerSample = 2
 		scaleDivisor   = 11000.0
@@ -294,37 +405,52 @@ func (p *Player) runPCMAnalysis(r io.Reader, cancel chan struct{}) {
 		silenceFramesN = 8
 	)
 	rawBuf := make([]byte, pcmChunkBytes)
-	frameSamples := pcmChunkBytes / bytesPerSample
-	frameDur := time.Second * time.Duration(frameSamples) / time.Duration(pcmSampleRate)
 	binState := make([]float64, NumBands)
 	prevSamples := make([]int16, NumBands)
 	binPeak := make([]float64, NumBands)
 	silenceFrames := 0
 	frames := 0
 	lastLog := time.Now()
-	var nextFrameAt time.Time
 
 	for {
-		select {
-		case <-cancel:
-			return
-		default:
-		}
-
-		n, err := io.ReadFull(r, rawBuf)
+		n, err := io.ReadAtLeast(r, rawBuf, 2)
 		if err != nil {
-			writeLog("viz.analysis.read_error err=%v", err)
-			return
+			if (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) && n >= 2 {
+				// Keep processing trailing bytes instead of dropping the last frame.
+			} else {
+				writeLog("pcm.pipeline.read_error err=%v", err)
+				return err
+			}
 		}
+		// Ensure sample-aligned buffer length for 16-bit PCM.
+		if n%2 == 1 {
+			n--
+			if n == 0 {
+				continue
+			}
+		}
+		chunk := rawBuf[:n]
+		volScale := float64(clampVolume(p.Volume())) / 100.0
+		isPaused := atomic.LoadInt32(&p.pauseFlag) == 1
+		playBuf := make([]byte, len(chunk))
+		copy(playBuf, chunk)
+
 		for i := range binPeak {
 			binPeak[i] = 0
 		}
-		var out [NumBands]float64
+		var bands [NumBands]float64
 		frameAbsSum := 0.0
 		samplesFound := n / bytesPerSample
 		for i := 0; i < samplesFound; i++ {
 			base := i * 2
-			sample := int16(binary.LittleEndian.Uint16(rawBuf[base:]))
+			sample := int16(binary.LittleEndian.Uint16(chunk[base:]))
+			audioSample := sample
+			if isPaused {
+				audioSample = 0
+			} else {
+				audioSample = int16(float64(sample) * volScale)
+			}
+			binary.LittleEndian.PutUint16(playBuf[base:], uint16(audioSample))
 			absSample := math.Abs(float64(sample))
 			frameAbsSum += absSample
 			for b := 0; b < NumBands; b++ {
@@ -377,69 +503,20 @@ func (p *Player) runPCMAnalysis(r io.Reader, cancel chan struct{}) {
 			if v < noiseGate {
 				v = 0
 			}
-			out[b] = v
+			bands[b] = v
 		}
 
-		p.Viz.set(out)
+		p.Viz.set(bands)
+		if _, err := audioOut.Write(playBuf); err != nil {
+			return fmt.Errorf("write audio: %w", err)
+		}
 		frames++
 		if time.Since(lastLog) >= 5*time.Second {
-			writeLog("viz.analysis.heartbeat frames=%d", frames)
+			writeLog("pcm.pipeline.heartbeat frames=%d", frames)
 			frames = 0
 			lastLog = time.Now()
 		}
-
-		// Pace analysis to audio-time so bursty live-segment delivery (e.g. ~5s HLS)
-		// still renders as continuous motion in the TUI.
-		now := time.Now()
-		if nextFrameAt.IsZero() || now.Sub(nextFrameAt) > 250*time.Millisecond {
-			nextFrameAt = now
-		}
-		nextFrameAt = nextFrameAt.Add(frameDur)
-		sleepFor := time.Until(nextFrameAt)
-		if sleepFor > 0 {
-			timer := time.NewTimer(sleepFor)
-			select {
-			case <-cancel:
-				if !timer.Stop() {
-					<-timer.C
-				}
-				return
-			case <-timer.C:
-			}
-		}
 	}
-}
-
-// stopPCMCapture signals the analysis goroutine and clears the visualizer.
-func (p *Player) stopPCMCapture() {
-	p.mu.Lock()
-	cancel := p.pcmCancel
-	p.pcmCancel = nil
-	p.mu.Unlock()
-
-	if cancel != nil {
-		close(cancel)
-	}
-	writeLog("viz.capture.stop")
-	p.Viz.set([NumBands]float64{})
-}
-
-// RestartPCMCapture restarts only the visualizer PCM capture while keeping
-// audio playback running.
-func (p *Player) RestartPCMCapture() bool {
-	p.mu.Lock()
-	url := p.streamURL
-	running := p.cmd != nil
-	p.mu.Unlock()
-
-	if !running || url == "" {
-		writeLog("viz.capture.restart_skipped running=%t url_empty=%t", running, url == "")
-		return false
-	}
-	writeLog("viz.capture.restart")
-	p.stopPCMCapture()
-	p.startPCMCapture(url)
-	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -447,36 +524,36 @@ func (p *Player) RestartPCMCapture() bool {
 // ---------------------------------------------------------------------------
 
 func (p *Player) Stop() error {
-	p.stopPCMCapture()
-
 	p.mu.Lock()
 	cmd := p.cmd
-	stdinPipe := p.stdin
 	waitCh := p.waitCh
+	stopCh := p.stopCh
 	p.cmd = nil
-	p.stdin = nil
 	p.waitCh = nil
 	p.streamURL = ""
+	p.stopCh = nil
+	atomic.StoreInt32(&p.pauseFlag, 0)
+	player := p.audioPlayer
+	p.audioPlayer = nil
+	ctx := p.audioCtx
+	p.audioCtx = nil
+	p.ffmpegStderr = nil
 	p.mu.Unlock()
+	if stopCh != nil {
+		close(stopCh)
+	}
 
 	if cmd == nil {
+		if player != nil {
+			_ = player.Close()
+		}
+		if ctx != nil {
+			_ = ctx.Close()
+		}
+		p.Viz.set([NumBands]float64{})
 		return nil
 	}
 	writeLog("player.stop")
-
-	if stdinPipe != nil {
-		_, _ = stdinPipe.Write([]byte{'q'})
-		_ = stdinPipe.Close()
-	}
-
-	if waitCh != nil {
-		select {
-		case <-waitCh:
-			writeLog("player.stop.ffplay_wait_ok")
-			return nil
-		case <-time.After(600 * time.Millisecond):
-		}
-	}
 
 	if cmd.Process != nil {
 		_ = cmd.Process.Kill()
@@ -484,14 +561,27 @@ func (p *Player) Stop() error {
 	if waitCh != nil {
 		<-waitCh
 	}
-	writeLog("player.stop.ffplay_killed")
+	if player != nil {
+		_ = player.Close()
+	}
+	if ctx != nil {
+		_ = ctx.Close()
+	}
+	p.Viz.set([NumBands]float64{})
+	writeLog("player.stop.ffmpeg_killed")
 	return nil
 }
 
 func (p *Player) IsRunning() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.cmd != nil
+	if p.cmd == nil {
+		return false
+	}
+	if p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
+		return false
+	}
+	return true
 }
 
 func (p *Player) WaitChan() <-chan error {
@@ -500,8 +590,30 @@ func (p *Player) WaitChan() <-chan error {
 	return p.waitCh
 }
 
+func isStopped(stopCh <-chan struct{}) bool {
+	if stopCh == nil {
+		return false
+	}
+	select {
+	case <-stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
 func (p *Player) PauseToggle() error {
-	return p.sendKey('p')
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd == nil {
+		return errPlayerNotRunning
+	}
+	if atomic.LoadInt32(&p.pauseFlag) == 1 {
+		atomic.StoreInt32(&p.pauseFlag, 0)
+	} else {
+		atomic.StoreInt32(&p.pauseFlag, 1)
+	}
+	return nil
 }
 
 func (p *Player) IncreaseVolume(step int) (int, error) {
@@ -512,7 +624,7 @@ func (p *Player) IncreaseVolume(step int) (int, error) {
 	p.volume = clampVolume(p.volume + step)
 	vol := p.volume
 	p.mu.Unlock()
-	return vol, p.sendKey('0')
+	return vol, nil
 }
 
 func (p *Player) DecreaseVolume(step int) (int, error) {
@@ -523,24 +635,13 @@ func (p *Player) DecreaseVolume(step int) (int, error) {
 	p.volume = clampVolume(p.volume - step)
 	vol := p.volume
 	p.mu.Unlock()
-	return vol, p.sendKey('9')
+	return vol, nil
 }
 
 func (p *Player) Volume() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.volume
-}
-
-func (p *Player) sendKey(key byte) error {
-	p.mu.Lock()
-	stdinPipe := p.stdin
-	p.mu.Unlock()
-	if stdinPipe == nil {
-		return errPlayerNotRunning
-	}
-	_, err := stdinPipe.Write([]byte{key})
-	return err
 }
 
 func clampVolume(value int) int {

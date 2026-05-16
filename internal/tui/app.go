@@ -309,6 +309,22 @@ func (a *app) onTick() {
 		return
 	}
 
+	// Consume playback completion/error signal to surface real failures.
+	if waitCh := a.player.WaitChan(); waitCh != nil {
+		select {
+		case err, ok := <-waitCh:
+			a.playing.Set(false)
+			a.paused.Set(false)
+			if !ok || err == nil {
+				a.setTransientError("playback stopped")
+			} else {
+				a.setTransientError(fmt.Sprintf("playback failed: %v", err))
+			}
+			return
+		default:
+		}
+	}
+
 	if !a.player.IsRunning() {
 		a.playing.Set(false)
 		a.paused.Set(false)
@@ -340,11 +356,11 @@ func (a *app) onTick() {
 	fresh := a.player.Viz.IsFresh(180 * time.Millisecond)
 
 	const (
-		attackFresh = 0.36 // smooth rise to reduce frame-to-frame jitter
-		attackStale = 0.12 // avoid sudden jumps when feed resumes after stalls
-		decayFresh  = 0.93 // gentle release while stream is healthy
+		attackFresh = 0.36  // smooth rise to reduce frame-to-frame jitter
+		attackStale = 0.12  // avoid sudden jumps when feed resumes after stalls
+		decayFresh  = 0.93  // gentle release while stream is healthy
 		decayStale  = 0.985 // very slow fall during short analyzer stalls
-		decayPause  = 0.94 // slow decay when paused (visual idle)
+		decayPause  = 0.94  // slow decay when paused (visual idle)
 	)
 
 	for b := 0; b < radio.NumBands; b++ {
@@ -368,7 +384,6 @@ func (a *app) onTick() {
 		}
 	}
 }
-
 
 func (a *app) handleQuitOrBack(ke gotui.KeyEvent) {
 	switch a.mode.Get() {
