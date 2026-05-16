@@ -35,9 +35,9 @@ const NumBands = 32
 
 // PCM capture parameters.
 const (
-	pcmSampleRate = 22050
-	pcmChannels   = 1
-	pcmChunkBytes = 512
+	pcmSampleRate = 44100
+	pcmChannels   = 2
+	pcmChunkBytes = 4096
 	fftSize       = 1024
 )
 
@@ -345,18 +345,16 @@ func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec
 	args := []string{
 		"-loglevel", "error",
 		"-nostdin",
-		// Reduce demux/IO buffering so PCM reaches the analyzer continuously
-		// instead of in large live-segment bursts.
-		"-fflags", "+nobuffer",
-		"-flags", "low_delay",
-		"-flush_packets", "1",
-		"-max_delay", "0",
-		"-max_probe_packets", "1",
-		"-rw_timeout", "15000000",
-		"-reconnect_on_network_error", "1",
-		"-reconnect_on_http_error", "4xx,5xx",
-		"-probesize", "32k",
-		"-analyzeduration", "0",
+		// "-fflags", "+nobuffer",
+		// "-flags", "low_delay",
+		// "-flush_packets", "1",
+		// "-max_delay", "0",
+		// "-max_probe_packets", "1",
+		// "-rw_timeout", "15000000",
+		// "-reconnect_on_network_error", "1",
+		// "-reconnect_on_http_error", "4xx,5xx",
+		// "-probesize", "32k",
+		// "-analyzeduration", "0",
 	}
 	if withReconnect {
 		args = append(args,
@@ -367,9 +365,9 @@ func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec
 		)
 	}
 	args = append(args, "-i", streamURL, "-vn", "-sn", "-dn")
-	if strictMap {
-		args = append(args, "-map", "0:a:0")
-	}
+	// if strictMap {
+	// 	args = append(args, "-map", "0:a:0")
+	// }
 	args = append(args,
 		"-acodec", "pcm_s16le",
 		"-f", "s16le",
@@ -395,8 +393,6 @@ func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec
 	return ffmpeg, stdout, stderr, nil
 }
 
-// runPCMAnalysis uses chunk-based amplitude/delta bins (reference logic style)
-// instead of FFT, which is more tolerant for unstable live HLS chunks.
 func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 	const (
 		bytesPerSample = 2
@@ -430,7 +426,6 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 				return err
 			}
 		}
-		// Ensure sample-aligned buffer length for 16-bit PCM.
 		if n%2 == 1 {
 			n--
 			if n == 0 {
@@ -456,161 +451,146 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 				audioSample = int16(float64(sample) * volScale)
 			}
 			binary.LittleEndian.PutUint16(playBuf[base:], uint16(audioSample))
-			// Keep analyzer fed with source PCM (not post-volume) for stable visuals.
-			sampleNorm := float64(sample) / 32768.0
-			rmsAccum += sampleNorm * sampleNorm
-			fftIn[fftPos] = sampleNorm
-			fftPos++
-			if fftPos >= fftSize {
-				fftPos = 0
-				spec := fftMagnitudes(fftIn, window)
-				bands := bandEnergies(spec, bandRanges)
-				linMean := 0.0
-				linVals := make([]float64, NumBands)
-				for b := 0; b < NumBands; b++ {
-					// dB-like compression: keeps crowd/noisy material from saturating all bars.
-					db := 20.0 * math.Log10(1e-9+bands[b])
-					if db < -90 {
-						db = -90
-					}
-					lin := (db + 90) / 90 // 0..1
-					linVals[b] = lin
-					linMean += lin
-				}
-				linMean /= float64(NumBands)
 
-				frameVals := make([]float64, NumBands)
-				frameMax := 0.0
-				frameMean := 0.0
-				lowNow := 0.0
-				for b := 0; b < NumBands; b++ {
-					lin := linVals[b]
-					// Per-band adaptive normalization with slower adaptation to avoid
-					// flattening all bars to similar heights.
-					if lin > binNorm[b] {
-						binNorm[b] += 0.045 * (lin - binNorm[b]) // slow attack
-					} else {
-						binNorm[b] *= 0.9993 // very slow decay
-					}
-					// Gain shaping: cap per-band auto gain so dense mixes don't
-					// force every band high all the time.
-					autoGain := 1.0 / (0.24 + 1.9*binNorm[b])
-					if autoGain > 1.45 {
-						autoGain = 1.45
-					}
-					if autoGain < 0.55 {
-						autoGain = 0.55
-					}
-
-					pos := float64(b) / float64(NumBands-1)
-					// Emphasize low end, but keep a clear high-band presence.
-					bassBoost := 1.0 + 0.52*math.Exp(-5.5*pos)
-					highLift := 0.92 + 0.34*math.Pow(pos, 1.15)
-
-					v := lin * autoGain * bassBoost * highLift
-					// Keep lower amplitudes visible while preventing heavy saturation.
-					v = math.Pow(v, 1.32)
-					if v < 0 {
-						v = 0
-					}
-					frameVals[b] = v
-					frameMean += v
-					if v > frameMax {
-						frameMax = v
-					}
-					if b < 6 {
-						lowNow += v
-					}
-				}
-				frameMean /= float64(NumBands)
-				lowNow /= 6.0
-				if lowNow > lowBandEnv {
-					lowBandEnv += 0.40 * (lowNow - lowBandEnv)
-				} else {
-					lowBandEnv += 0.12 * (lowNow - lowBandEnv)
-				}
-				kickDelta := lowNow - lowBandEnv
-				if kickDelta < 0 {
-					kickDelta = 0
-				}
-				if kickDelta > 0.45 {
-					kickDelta = 0.45
-				}
-				// Frame-relative normalization preserves peaks but creates clearer
-				// low-to-high contrast across bands in dense mixes.
-				if frameMax > 1e-6 {
-					targetPeak := 0.80 + 0.14*loudEnv
-					if targetPeak > 0.94 {
-						targetPeak = 0.94
-					}
-					scale := targetPeak / frameMax
+			if i%pcmChannels == 0 {
+				sampleNorm := float64(sample) / 32768.0
+				rmsAccum += sampleNorm * sampleNorm
+				fftIn[fftPos] = sampleNorm
+				fftPos++
+				if fftPos >= fftSize {
+					fftPos = 0
+					spec := fftMagnitudes(fftIn, window)
+					bands := bandEnergies(spec, bandRanges)
+					linMean := 0.0
+					linVals := make([]float64, NumBands)
 					for b := 0; b < NumBands; b++ {
-						v := frameVals[b]
-						// Competition curve: push near-mean bins down so only strong
-						// spectral components rise high.
-						contrastFloor := frameMean * 0.68
-						v = (v - contrastFloor) / (frameMax - contrastFloor + 1e-6)
+						db := 20.0 * math.Log10(1e-9+bands[b])
+						if db < -90 {
+							db = -90
+						}
+						lin := (db + 90) / 90
+						linVals[b] = lin
+						linMean += lin
+					}
+					linMean /= float64(NumBands)
+
+					frameVals := make([]float64, NumBands)
+					frameMax := 0.0
+					frameMean := 0.0
+					lowNow := 0.0
+					for b := 0; b < NumBands; b++ {
+						lin := linVals[b]
+						if lin > binNorm[b] {
+							binNorm[b] += 0.045 * (lin - binNorm[b])
+						} else {
+							binNorm[b] *= 0.9993
+						}
+						autoGain := 1.0 / (0.24 + 1.9*binNorm[b])
+						if autoGain > 1.45 {
+							autoGain = 1.45
+						}
+						if autoGain < 0.55 {
+							autoGain = 0.55
+						}
+
+						pos := float64(b) / float64(NumBands-1)
+						bassBoost := 1.0 + 0.52*math.Exp(-5.5*pos)
+						highLift := 0.92 + 0.34*math.Pow(pos, 1.15)
+
+						v := lin * autoGain * bassBoost * highLift
+						v = math.Pow(v, 1.32)
 						if v < 0 {
 							v = 0
 						}
-						v = math.Pow(v, 0.96)
-						v *= scale
-						// Kick transient boost: low bands should punch on drum hits.
-						if b < 8 {
-							lowPos := 1.0 - float64(b)/8.0
-							v += kickDelta * (0.75 * lowPos)
+						frameVals[b] = v
+						frameMean += v
+						if v > frameMax {
+							frameMax = v
 						}
-						// Keep right side alive: mild high-band floor tied to loudness.
-						if b >= NumBands/2 {
-							highPos := float64(b-NumBands/2) / float64(NumBands/2)
-							v += (0.015 + 0.03*loudEnv) * (0.45 + 0.55*highPos)
+						if b < 6 {
+							lowNow += v
 						}
-						// Dynamic gate: suppress tiny bins so they don't all appear high.
-						dynGate := noiseGate + 0.10*linMean + 0.03*loudEnv
-						if dynGate > 0.12 {
-							dynGate = 0.12
+					}
+					frameMean /= float64(NumBands)
+					lowNow /= 6.0
+					if lowNow > lowBandEnv {
+						lowBandEnv += 0.40 * (lowNow - lowBandEnv)
+					} else {
+						lowBandEnv += 0.12 * (lowNow - lowBandEnv)
+					}
+					kickDelta := lowNow - lowBandEnv
+					if kickDelta < 0 {
+						kickDelta = 0
+					}
+					if kickDelta > 0.45 {
+						kickDelta = 0.45
+					}
+					if frameMax > 1e-6 {
+						targetPeak := 0.80 + 0.14*loudEnv
+						if targetPeak > 0.94 {
+							targetPeak = 0.94
 						}
-						if v < dynGate {
-							v = 0
-						}
-						if v > 1 {
-							v = 1
-						}
+						scale := targetPeak / frameMax
+						for b := 0; b < NumBands; b++ {
+							v := frameVals[b]
+							contrastFloor := frameMean * 0.68
+							v = (v - contrastFloor) / (frameMax - contrastFloor + 1e-6)
+							if v < 0 {
+								v = 0
+							}
+							v = math.Pow(v, 0.96)
+							v *= scale
+							if b < 8 {
+								lowPos := 1.0 - float64(b)/8.0
+								v += kickDelta * (0.75 * lowPos)
+							}
+							if b >= NumBands/2 {
+								highPos := float64(b-NumBands/2) / float64(NumBands/2)
+								v += (0.015 + 0.03*loudEnv) * (0.45 + 0.55*highPos)
+							}
+							dynGate := noiseGate + 0.10*linMean + 0.03*loudEnv
+							if dynGate > 0.12 {
+								dynGate = 0.12
+							}
+							if v < dynGate {
+								v = 0
+							}
+							if v > 1 {
+								v = 1
+							}
 
-						// Band smoothing: fast attack, moderate release to avoid staircase look.
-						if v > binState[b] {
-							binState[b] += 0.40 * (v - binState[b])
-						} else {
-							binState[b] *= 0.84
+							if v > binState[b] {
+								binState[b] += 0.40 * (v - binState[b])
+							} else {
+								binState[b] *= 0.84
+							}
+							out[b] = binState[b]
 						}
-						out[b] = binState[b]
+					} else {
+						for b := 0; b < NumBands; b++ {
+							binState[b] *= 0.87
+							out[b] = binState[b]
+						}
 					}
 				} else {
 					for b := 0; b < NumBands; b++ {
-						binState[b] *= 0.87
 						out[b] = binState[b]
 					}
-				}
-			} else {
-				for b := 0; b < NumBands; b++ {
-					out[b] = binState[b]
 				}
 			}
 		}
 
-		// Real-world behavior: tie bar height to short-term loudness envelope so
-		// quiet transitions bring spectrum down, even when spectral shape remains.
 		chunkRMS := 0.0
 		if samplesFound > 0 {
 			chunkRMS = math.Sqrt(rmsAccum / float64(samplesFound))
 		}
-		if chunkRMS > loudRef {
-			loudRef += 0.02 * (chunkRMS - loudRef) // slower rise
-		} else {
-			loudRef += 0.002 * (chunkRMS - loudRef) // very slow fall
-		}
 		if loudRef < 0.03 {
 			loudRef = 0.03
+		}
+		if chunkRMS > loudRef {
+			loudRef += 0.02 * (chunkRMS - loudRef)
+		} else {
+			loudRef += 0.002 * (chunkRMS - loudRef)
 		}
 		envTarget := chunkRMS / (loudRef * 1.22)
 		if envTarget > 1 {
@@ -619,13 +599,11 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 		if envTarget < 0 {
 			envTarget = 0
 		}
-		// Faster release so transition dips are visible quickly.
 		if envTarget > loudEnv {
 			loudEnv += 0.20 * (envTarget - loudEnv)
 		} else {
 			loudEnv += 0.45 * (envTarget - loudEnv)
 		}
-		// Keep small floor so quiet passages still move, without keeping all bars high.
 		loudGain := 0.05 + 0.95*loudEnv
 		for b := 0; b < NumBands; b++ {
 			out[b] *= loudGain
@@ -760,10 +738,6 @@ func bandEnergies(spec []float64, ranges []bandRange) []float64 {
 	return out
 }
 
-// ---------------------------------------------------------------------------
-// Playback control
-// ---------------------------------------------------------------------------
-
 func (p *Player) Stop() error {
 	p.mu.Lock()
 	cmd := p.cmd
@@ -894,3 +868,4 @@ func clampVolume(value int) int {
 	}
 	return value
 }
+
