@@ -158,7 +158,7 @@ func (a *app) Watchers() []gotui.Watcher {
 	return []gotui.Watcher{
 		gotui.Watch(a.bootCh, a.onBootProgress),
 		gotui.Watch(a.resultCh, a.onAsyncResult),
-		gotui.OnTimer(80*time.Millisecond, a.onTick),
+		gotui.OnTimer(33*time.Millisecond, a.onTick),
 	}
 }
 
@@ -288,13 +288,13 @@ func (a *app) onAsyncResult(result asyncResult) {
 func (a *app) onTick() {
 	a.aniTick++
 
-	// Advance spinner every 5 ticks (~400ms)
-	if a.aniTick%5 == 0 {
+	// Advance spinner every 3 ticks (~99ms @ 33ms tick -> ~10 FPS spinner).
+	if a.aniTick%3 == 0 {
 		a.spinnerFrame.Update(func(v int) int { return v + 1 })
 	}
-	// Wave and pulse advance every tick
-	a.wavePhase.Update(func(v float64) float64 { return v + 0.07 })
-	a.pulsePhase.Update(func(v float64) float64 { return v + 0.04 })
+	// Keep animation speeds similar to previous behavior while increasing frame rate.
+	a.wavePhase.Update(func(v float64) float64 { return v + 0.029 })
+	a.pulsePhase.Update(func(v float64) float64 { return v + 0.0165 })
 
 	if a.mode.Get() != viewPlayer || !a.playing.Get() {
 		return
@@ -584,7 +584,7 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 	return root
 }
 
-var spinnerBraille = []string{"⠋", "⠙", "⠸", "⠴", "⠦", "⠇"}
+var spinnerBraille = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func (a *app) renderHeader(borderColor gotui.Color) *gotui.Element {
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
