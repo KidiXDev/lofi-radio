@@ -83,6 +83,7 @@ type app struct {
 	vizBands    [radio.NumBands]float64
 	vizHistory  [][4]float64
 	vizLiveHold int
+	listOffset  int
 
 	resolveToken *gotui.State[int]
 	bootCh       chan bootstrap.ProgressEvent
@@ -281,6 +282,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 
 		a.categories.Set(result.categories)
 		a.selected.Set(0)
+		a.listOffset = 0
 		a.mode.Set(viewSelect)
 		a.status.Set("Select a category")
 		a.footerHint.Set(selectHint)
@@ -444,16 +446,30 @@ func (a *app) onTick() {
 		}
 	}
 
-	// Update real spectrum history (4 bands: Bass, Low-Mid, High-Mid, High)
+	// Update real spectrum history (4 bands: Bass, Low, Mid, High)
 	if !paused && (a.player.Viz.HasData() || a.vizLiveHold > 0) {
 		var entry [4]float64
-		step := radio.NumBands / 4
+		// Indices for 32 bands mapped logarithmically:
+		// 0-4:   Sub-bass & Kicks
+		// 5-12:  Low-mids & Snares
+		// 13-22: Mids & Melody
+		// 23-31: Highs & Percussion
+		ranges := [][2]int{{0, 4}, {5, 12}, {13, 22}, {23, 31}}
+		
 		for i := 0; i < 4; i++ {
 			sum := 0.0
-			for j := i * step; j < (i+1)*step; j++ {
+			start, end := ranges[i][0], ranges[i][1]
+			count := float64(end - start + 1)
+			for j := start; j <= end; j++ {
 				sum += a.vizBands[j]
 			}
-			entry[i] = sum / float64(step)
+			entry[i] = sum / count
+			
+			// For BASS (index 0), we want it to be more punchy and less "always full"
+			// by using a higher threshold or slightly more aggressive decay.
+			if i == 0 {
+				entry[i] = math.Pow(entry[i], 1.2) // increase contrast for bass
+			}
 		}
 		a.vizHistory = append(a.vizHistory, entry)
 		if len(a.vizHistory) > 128 {
@@ -624,6 +640,7 @@ func (a *app) goToSelector(status string) {
 		return
 	}
 
+	a.listOffset = 0
 	a.mode.Set(viewSelect)
 	a.status.Set(status)
 	a.footerHint.Set(selectHint)
@@ -645,6 +662,7 @@ func (a *app) goToChannelSelector() {
 	}
 
 	a.selected.Set(initialIdx)
+	a.listOffset = 0
 	a.mode.Set(viewChannelSelect)
 	a.status.Set("Select a channel")
 	a.footerHint.Set(channelHint)
@@ -1107,10 +1125,14 @@ func (a *app) renderChannelSelector(termWidth, termHeight, contentHeight int) *g
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 		))
 	} else {
-		start := 0
-		if selected >= maxRows {
-			start = selected - maxRows + 1
+		// Sticky scroll logic
+		if selected < a.listOffset {
+			a.listOffset = selected
+		} else if selected >= a.listOffset+maxRows {
+			a.listOffset = selected - maxRows + 1
 		}
+		
+		start := a.listOffset
 		end := min(start+maxRows, len(a.channels))
 
 		for i := start; i < end; i++ {
@@ -1287,10 +1309,14 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 		))
 	} else {
-		start := 0
-		if selected >= maxRows {
-			start = selected - maxRows + 1
+		// Sticky scroll logic
+		if selected < a.listOffset {
+			a.listOffset = selected
+		} else if selected >= a.listOffset+maxRows {
+			a.listOffset = selected - maxRows + 1
 		}
+
+		start := a.listOffset
 		end := min(start+maxRows, len(categories))
 
 		for i := start; i < end; i++ {

@@ -405,9 +405,9 @@ func startPCMFFmpeg(streamURL string, withReconnect bool) (*exec.Cmd, io.ReadClo
 func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 	const (
 		bytesPerSample = pcmBitDepthBytes
-		noiseGate      = 0.012
-		minFreqHz      = 40.0
-		maxFreqHz      = 9000.0
+		noiseGate      = 0.008
+		minFreqHz      = 32.0
+		maxFreqHz      = 15000.0
 	)
 	rawBuf := make([]byte, pcmChunkBytes)
 	binState := make([]float64, NumBands) // smoothed output in [0,1]
@@ -528,55 +528,66 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 					frameMean /= float64(NumBands)
 					lowNow /= 6.0
 					if lowNow > lowBandEnv {
-						lowBandEnv += 0.40 * (lowNow - lowBandEnv)
+						lowBandEnv += 0.45 * (lowNow - lowBandEnv)
 					} else {
-						lowBandEnv += 0.12 * (lowNow - lowBandEnv)
+						lowBandEnv += 0.045 * (lowNow - lowBandEnv)
 					}
 					kickDelta := lowNow - lowBandEnv
 					if kickDelta < 0 {
 						kickDelta = 0
 					}
-					if kickDelta > 0.45 {
-						kickDelta = 0.45
+					if kickDelta > 0.65 {
+						kickDelta = 0.65
 					}
+
 					if frameMax > 1e-6 {
-						targetPeak := 0.80 + 0.14*loudEnv
-						if targetPeak > 0.94 {
-							targetPeak = 0.94
+						targetPeak := 0.65 + 0.28*loudEnv
+						if targetPeak > 0.95 {
+							targetPeak = 0.95
 						}
 						scale := targetPeak / frameMax
 						for b := range NumBands {
 							v := frameVals[b]
-							contrastFloor := frameMean * 0.68
+							contrastFloor := frameMean * 0.42
 							v = (v - contrastFloor) / (frameMax - contrastFloor + 1e-6)
 							if v < 0 {
 								v = 0
 							}
-							v = math.Pow(v, 0.96)
+							v = math.Pow(v, 1.15)
 							v *= scale
-							if b < 8 {
-								lowPos := 1.0 - float64(b)/8.0
-								v += kickDelta * (0.75 * lowPos)
+
+							// Apply punchy bass boost
+							if b < 7 {
+								lowPos := 1.0 - float64(b)/7.0
+								// Stronger kick impact
+								v += kickDelta * (1.65 * lowPos)
 							}
+
+							// Boost dynamics for variety
+							if v > 0 {
+								v = math.Pow(v, 0.82)
+							}
+
 							if b >= NumBands/2 {
 								highPos := float64(b-NumBands/2) / float64(NumBands/2)
-								v += (0.015 + 0.03*loudEnv) * (0.45 + 0.55*highPos)
+								v += (0.012 + 0.025*loudEnv) * (0.45 + 0.55*highPos)
 							}
-							dynGate := noiseGate + 0.10*linMean + 0.03*loudEnv
-							if dynGate > 0.12 {
-								dynGate = 0.12
+
+							if v > 1.0 {
+								v = 1.0
 							}
-							if v < dynGate {
-								v = 0
-							}
-							if v > 1 {
-								v = 1
+
+							attack := 0.48
+							decay := 0.82
+							if b < 6 {
+								attack = 0.65
+								decay = 0.78
 							}
 
 							if v > binState[b] {
-								binState[b] += 0.40 * (v - binState[b])
+								binState[b] += attack * (v - binState[b])
 							} else {
-								binState[b] *= 0.84
+								binState[b] *= decay
 							}
 							out[b] = binState[b]
 						}
