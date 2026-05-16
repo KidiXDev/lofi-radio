@@ -841,8 +841,6 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 var spinnerBraille = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func (a *app) renderHeader(borderColor gotui.Color) *gotui.Element {
-	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
-
 	header := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithHeight(3),
@@ -902,15 +900,41 @@ func (a *app) renderHeader(borderColor gotui.Color) *gotui.Element {
 		gotui.WithGap(1),
 		gotui.WithFlexShrink(0),
 	)
+
+	// Status Indicator
+	statusText := "● LIVE"
+	isLive := a.playing.Get() && !a.paused.Get()
+	liveStyle := gotui.NewStyle().Bold()
+	if isLive {
+		// Faster pulse for the LIVE indicator
+		if math.Sin(pulse*4.0) > 0 {
+			liveStyle = liveStyle.Foreground(gotui.BrightRed)
+		} else {
+			liveStyle = liveStyle.Foreground(gotui.Red)
+		}
+	} else if a.paused.Get() {
+		statusText = "● PAUSED"
+		liveStyle = liveStyle.Foreground(gotui.BrightYellow)
+	} else {
+		statusText = "● IDLE"
+		liveStyle = liveStyle.Foreground(gotui.BrightBlack).Dim()
+	}
+
 	right.AddChild(gotui.New(
-		gotui.WithText("SYNC"),
-		gotui.WithWrap(false),
+		gotui.WithText(statusText),
+		gotui.WithTextStyle(liveStyle),
+	))
+
+	right.AddChild(gotui.New(
+		gotui.WithText("|"),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 	))
+
+	// System Clock
 	right.AddChild(gotui.New(
-		gotui.WithText(spin),
+		gotui.WithText(time.Now().Format("15:04:05")),
 		gotui.WithWrap(false),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightYellow).Bold()),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.White).Bold()),
 	))
 
 	header.AddChild(left)
