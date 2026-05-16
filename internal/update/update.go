@@ -105,7 +105,7 @@ func latestRelease() (ReleaseInfo, error) {
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "lofi-radio-updater")
 
-	client := &http.Client{Timeout: downloadTimeout}
+	client := &http.Client{Timeout: requestTimeout}
 	response, err := client.Do(request)
 	if err != nil {
 		return ReleaseInfo{}, fmt.Errorf("request latest release: %w", err)
@@ -114,7 +114,11 @@ func latestRelease() (ReleaseInfo, error) {
 
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
-		return ReleaseInfo{}, fmt.Errorf("latest release request failed: %s (%s)", response.Status, strings.TrimSpace(string(body)))
+		bodyText := strings.TrimSpace(string(body))
+		if err := githubRateLimitError(response, bodyText); err != nil {
+			return ReleaseInfo{}, err
+		}
+		return ReleaseInfo{}, fmt.Errorf("latest release request failed: %s (%s)", response.Status, bodyText)
 	}
 
 	var release githubRelease
@@ -132,6 +136,37 @@ func latestRelease() (ReleaseInfo, error) {
 		HTMLURL: release.HTMLURL,
 		Asset:   asset,
 	}, nil
+}
+
+func githubRateLimitError(response *http.Response, body string) error {
+	if response == nil {
+		return nil
+	}
+
+	if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+
+	remaining := strings.TrimSpace(response.Header.Get("X-RateLimit-Remaining"))
+	retryAfter := strings.TrimSpace(response.Header.Get("Retry-After"))
+	resetAt := strings.TrimSpace(response.Header.Get("X-RateLimit-Reset"))
+
+	if remaining == "0" || response.StatusCode == http.StatusTooManyRequests || strings.Contains(strings.ToLower(body), "rate limit") {
+		reason := "github api rate limit reached"
+		if retryAfter != "" {
+			return fmt.Errorf("%s, retry after %ss", reason, retryAfter)
+		}
+		if resetAt != "" {
+			if unixSec, err := strconv.ParseInt(resetAt, 10, 64); err == nil {
+				resetTime := time.Unix(unixSec, 0).Local().Format(time.RFC3339)
+				return fmt.Errorf("%s, resets at %s", reason, resetTime)
+			}
+			return fmt.Errorf("%s, reset token=%s", reason, resetAt)
+		}
+		return fmt.Errorf("%s", reason)
+	}
+
+	return nil
 }
 
 func selectAsset(assets []githubAsset) (Asset, error) {

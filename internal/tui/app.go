@@ -11,6 +11,8 @@ import (
 	"github.com/kidixdev/lofi-radio/internal/bootstrap"
 	"github.com/kidixdev/lofi-radio/internal/config"
 	"github.com/kidixdev/lofi-radio/internal/radio"
+	"github.com/kidixdev/lofi-radio/internal/update"
+	"github.com/kidixdev/lofi-radio/internal/version"
 )
 
 type viewMode int
@@ -21,6 +23,8 @@ const (
 	viewSelect
 	viewResolving
 	viewPlayer
+	viewUpdatePrompt
+	viewUpdating
 	viewError
 )
 
@@ -37,6 +41,8 @@ const (
 	asyncFetchCategories asyncKind = "fetch_categories"
 	asyncResolve         asyncKind = "resolve"
 	asyncPlay            asyncKind = "play"
+	asyncCheckUpdate     asyncKind = "check_update"
+	asyncRunUpdate       asyncKind = "run_update"
 )
 
 type asyncResult struct {
@@ -45,6 +51,9 @@ type asyncResult struct {
 	category     radio.Category
 	streamURL    string
 	resolveToken int
+	release      update.ReleaseInfo
+	hasUpdate    bool
+	installPath  string
 	err          error
 }
 
@@ -84,10 +93,15 @@ type app struct {
 	vizHistory  [][4]float64
 	vizLiveHold int
 	listOffset  int
+	updateDone  bool
 
 	resolveToken *gotui.State[int]
+	updateChoice *gotui.State[int]
 	bootCh       chan bootstrap.ProgressEvent
 	resultCh     chan asyncResult
+
+	updateRelease update.ReleaseInfo
+	updateError   string
 
 	exitErr error
 	fatal   bool
@@ -141,12 +155,14 @@ func newApp(channelName, playlistURL string) *app {
 		pulsePhase:   gotui.NewState(0.0),
 
 		resolveToken: gotui.NewState(0),
+		updateChoice: gotui.NewState(0),
 		bootCh:       make(chan bootstrap.ProgressEvent, 64),
 		resultCh:     make(chan asyncResult, 8),
 		vizHistory:   make([][4]float64, 0, 128),
 	}
 
 	component.startBootstrap()
+	component.startCheckUpdate()
 	return component
 }
 
@@ -167,6 +183,7 @@ func (a *app) BindApp(ui *gotui.App) {
 	a.totalPaused.BindApp(ui)
 	a.now.BindApp(ui)
 	a.resolveToken.BindApp(ui)
+	a.updateChoice.BindApp(ui)
 	a.spinnerFrame.BindApp(ui)
 	a.wavePhase.BindApp(ui)
 	a.pulsePhase.BindApp(ui)
@@ -266,6 +283,10 @@ func (a *app) onAsyncResult(result asyncResult) {
 			return
 		}
 
+		if a.updateDone && a.updateRelease.TagName != "" {
+			a.showUpdatePrompt(a.updateRelease)
+			return
+		}
 		a.goToChannelSelector()
 
 	case asyncFetchCategories:
@@ -349,6 +370,31 @@ func (a *app) onAsyncResult(result asyncResult) {
 		a.mode.Set(viewPlayer)
 		a.status.Set("Playing")
 		a.footerHint.Set(playerHint)
+
+	case asyncCheckUpdate:
+		a.updateDone = true
+		if result.err != nil {
+			a.updateError = result.err.Error()
+			return
+		}
+		if !result.hasUpdate {
+			return
+		}
+		a.updateRelease = result.release
+		a.showUpdatePrompt(result.release)
+
+	case asyncRunUpdate:
+		a.updateDone = true
+		if result.err != nil {
+			a.setTransientError(fmt.Sprintf("update failed: %v", result.err))
+			return
+		}
+		if !result.hasUpdate {
+			a.status.Set("Already up to date")
+		} else {
+			a.status.Set(fmt.Sprintf("Updated to %s (%s)", result.release.TagName, result.installPath))
+		}
+		a.goToChannelSelector()
 	}
 }
 
@@ -455,7 +501,7 @@ func (a *app) onTick() {
 		// 13-22: Mids & Melody
 		// 23-31: Highs & Percussion
 		ranges := [][2]int{{0, 4}, {5, 12}, {13, 22}, {23, 31}}
-		
+
 		for i := 0; i < 4; i++ {
 			sum := 0.0
 			start, end := ranges[i][0], ranges[i][1]
@@ -464,7 +510,7 @@ func (a *app) onTick() {
 				sum += a.vizBands[j]
 			}
 			entry[i] = sum / count
-			
+
 			// For BASS (index 0), we want it to be more punchy and less "always full"
 			// by using a higher threshold or slightly more aggressive decay.
 			if i == 0 {
@@ -504,6 +550,10 @@ func (a *app) handleQuitOrBack(ke gotui.KeyEvent) {
 		// Top level menu: do nothing on escape to prevent accidental exit
 		return
 
+	case viewUpdatePrompt:
+		a.skipUpdatePrompt()
+		return
+
 	case viewResolving:
 		a.resolveToken.Update(func(v int) int { return v + 1 })
 		a.goToSelector("Select a category")
@@ -537,6 +587,16 @@ func (a *app) handleEnter(ke gotui.KeyEvent) {
 
 		a.startFetchCategories(channel.Name, channel.PlaylistURL)
 
+	case viewUpdatePrompt:
+		choice := clamp(a.updateChoice.Get(), 0, 1)
+		a.updateChoice.Set(choice)
+		if choice == 0 {
+			a.startSelfUpdate()
+			return
+		}
+		a.skipUpdatePrompt()
+		return
+
 	case viewSelect:
 		categories := a.categories.Get()
 		if len(categories) == 0 {
@@ -563,6 +623,17 @@ func (a *app) handleEnter(ke gotui.KeyEvent) {
 }
 
 func (a *app) moveSelection(delta int) {
+	if a.mode.Get() == viewUpdatePrompt {
+		if delta != 0 {
+			if a.updateChoice.Get() == 0 {
+				a.updateChoice.Set(1)
+			} else {
+				a.updateChoice.Set(0)
+			}
+		}
+		return
+	}
+
 	if a.mode.Get() != viewSelect && a.mode.Get() != viewChannelSelect {
 		return
 	}
@@ -733,6 +804,53 @@ func (a *app) startBootstrap() {
 	}()
 }
 
+func (a *app) startCheckUpdate() {
+	if strings.EqualFold(strings.TrimSpace(version.Version), "dev") {
+		a.updateDone = true
+		return
+	}
+
+	go func() {
+		release, hasUpdate, err := update.CheckLatest(version.Version)
+		a.emitResult(asyncResult{
+			kind:      asyncCheckUpdate,
+			release:   release,
+			hasUpdate: hasUpdate,
+			err:       err,
+		})
+	}()
+}
+
+func (a *app) startSelfUpdate() {
+	a.mode.Set(viewUpdating)
+	a.status.Set("Updating to latest release")
+	a.footerHint.Set("Please wait...")
+	a.errMessage.Set("")
+	go func() {
+		release, updated, installPath, err := update.SelfUpdate(version.Version, "")
+		a.emitResult(asyncResult{
+			kind:        asyncRunUpdate,
+			release:     release,
+			hasUpdate:   updated,
+			installPath: installPath,
+			err:         err,
+		})
+	}()
+}
+
+func (a *app) showUpdatePrompt(release update.ReleaseInfo) {
+	a.updateRelease = release
+	a.updateChoice.Set(0)
+	a.mode.Set(viewUpdatePrompt)
+	a.status.Set("Update available")
+	a.footerHint.Set("Up/Down select  Enter confirm  Esc skip")
+}
+
+func (a *app) skipUpdatePrompt() {
+	a.updateRelease = update.ReleaseInfo{}
+	a.goToChannelSelector()
+}
+
 func (a *app) startFetchCategories(channelName, playlistURL string) {
 	a.channelName = channelName
 	a.playlistURL = playlistURL
@@ -843,6 +961,10 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 		mainView = a.renderResolving()
 	case viewPlayer:
 		mainView = a.renderPlayer(termWidth)
+	case viewUpdatePrompt:
+		mainView = a.renderUpdatePrompt()
+	case viewUpdating:
+		mainView = a.renderUpdating()
 	case viewError:
 		mainView = a.renderError()
 	}
@@ -1131,7 +1253,7 @@ func (a *app) renderChannelSelector(termWidth, termHeight, contentHeight int) *g
 		} else if selected >= a.listOffset+maxRows {
 			a.listOffset = selected - maxRows + 1
 		}
-		
+
 		start := a.listOffset
 		end := min(start+maxRows, len(a.channels))
 
@@ -1470,6 +1592,72 @@ func (a *app) renderResolving() *gotui.Element {
 	return box
 }
 
+func (a *app) renderUpdatePrompt() *gotui.Element {
+	box := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightYellow)),
+		gotui.WithPaddingTRBL(1, 2, 1, 2),
+		gotui.WithFlexGrow(1),
+		gotui.WithGap(1),
+	)
+
+	box.AddChild(gotui.New(
+		gotui.WithText(" UPDATE AVAILABLE"),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightYellow).Bold()),
+	))
+	box.AddChild(gotui.New(gotui.WithHR()))
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf(" Current: %s", version.Version)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+	))
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf(" Latest : %s", a.updateRelease.TagName)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
+	))
+
+	options := []string{"Update now", "Not now"}
+	selected := clamp(a.updateChoice.Get(), 0, len(options)-1)
+	for i := range options {
+		prefix := "  "
+		style := gotui.NewStyle().Foreground(gotui.BrightWhite)
+		if i == selected {
+			prefix = "▶ "
+			style = gotui.NewStyle().Foreground(gotui.BrightCyan).Bold()
+		}
+		box.AddChild(gotui.New(
+			gotui.WithText(prefix+options[i]),
+			gotui.WithTextStyle(style),
+		))
+	}
+
+	return box
+}
+
+func (a *app) renderUpdating() *gotui.Element {
+	box := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightCyan)),
+		gotui.WithPaddingTRBL(1, 2, 1, 2),
+		gotui.WithFlexGrow(1),
+		gotui.WithGap(1),
+		gotui.WithAlign(gotui.AlignCenter),
+		gotui.WithJustify(gotui.JustifyCenter),
+	)
+
+	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("%s  Installing %s ...", spin, a.updateRelease.TagName)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan).Bold()),
+	))
+	box.AddChild(gotui.New(
+		gotui.WithText(" Please wait, this may take a minute."),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+	return box
+}
+
 func (a *app) renderPlayer(termWidth int) *gotui.Element {
 	// Root row container
 	row := gotui.New(
@@ -1623,7 +1811,7 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 		gotui.WithText("● SPECTRUM WATERFALL (HISTORY)"),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold()),
 	))
-	
+
 	// Create a waterfall plot with 4 frequency rows
 	waterfall := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
@@ -1631,10 +1819,10 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 		gotui.WithJustify(gotui.JustifyCenter),
 		gotui.WithGap(0),
 	)
-	
+
 	histChars := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 	maxHistLen := (termWidth - 42) - 10
-	
+
 	bandLabels := []string{" HI ", " MID", " LOW", " BASS"}
 	bandGradients := []gotui.Gradient{
 		gotui.NewGradient(gotui.RGBColor(200, 100, 255), gotui.RGBColor(255, 100, 200)),
@@ -1648,28 +1836,32 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 			gotui.WithGap(1),
 		)
-		
+
 		row.AddChild(gotui.New(
 			gotui.WithText(bandLabels[i]),
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim().Bold()),
 		))
-		
+
 		if maxHistLen > 8 {
 			history := a.vizHistory
 			histWidth := maxHistLen - 6
 			if len(history) > histWidth {
 				history = history[len(history)-histWidth:]
 			}
-			
+
 			graphStr := ""
 			for _, entry := range history {
 				// Reverse i for display (HI at top, BASS at bottom)
-				val := entry[3-i] 
+				val := entry[3-i]
 				// Auto-scale a bit for better visibility
-				val *= 1.4 
+				val *= 1.4
 				idx := int(val * float64(len(histChars)-1))
-				if idx < 0 { idx = 0 }
-				if idx >= len(histChars) { idx = len(histChars) - 1 }
+				if idx < 0 {
+					idx = 0
+				}
+				if idx >= len(histChars) {
+					idx = len(histChars) - 1
+				}
 				graphStr += histChars[idx]
 			}
 			row.AddChild(gotui.New(
@@ -1679,17 +1871,19 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 		}
 		waterfall.AddChild(row)
 	}
-	
+
 	// Add technical labels to the bottom of decor box
 	statsRow := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithGap(4),
 	)
-	
+
 	peak := 0.0
 	for _, entry := range a.vizHistory {
 		for _, v := range entry {
-			if v > peak { peak = v }
+			if v > peak {
+				peak = v
+			}
 		}
 	}
 
@@ -1705,7 +1899,7 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 		gotui.WithText("RES: 33MS / 128PT"),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 	))
-	
+
 	decorBox.AddChild(waterfall)
 	decorBox.AddChild(statsRow)
 
@@ -1991,6 +2185,10 @@ func (a *app) modeLabel() string {
 		return "Preparing Stream"
 	case viewPlayer:
 		return "Now Playing"
+	case viewUpdatePrompt:
+		return "Update Available"
+	case viewUpdating:
+		return "Updating"
 	case viewError:
 		return "Error"
 	default:

@@ -16,28 +16,12 @@ func main() {
 	channelID := flag.String("channel", defaultChannel.ID, "channel id to use")
 	listChannels := flag.Bool("list-channels", false, "list available channel ids and exit")
 	showVersion := flag.Bool("version", false, "print app version and exit")
-	checkUpdate := flag.Bool("check-update", false, "check latest release version and exit")
 	runUpdate := flag.Bool("update", false, "download and install latest release")
 	updateInstallDir := flag.String("update-install-dir", "", "install directory for -update")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version.Version)
-		os.Exit(0)
-	}
-
-	if *checkUpdate {
-		release, hasUpdate, err := update.CheckLatest(version.Version)
-		if err != nil {
-			fmt.Printf("Error: check update failed: %v\n", err)
-			os.Exit(1)
-		}
-		if !hasUpdate {
-			fmt.Printf("You are up to date (%s).\n", version.Version)
-			os.Exit(0)
-		}
-		fmt.Printf("Update available: %s -> %s\n", version.Version, release.TagName)
-		fmt.Printf("Release page: %s\n", release.HTMLURL)
 		os.Exit(0)
 	}
 

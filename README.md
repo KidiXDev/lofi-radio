@@ -76,10 +76,6 @@ Installer behavior:
 
 ## 🔄 Updates
 
-- Check for updates:
-  ```bash
-  lofi -check-update
-  ```
 - Install latest update from GitHub Releases:
   ```bash
   lofi -update
