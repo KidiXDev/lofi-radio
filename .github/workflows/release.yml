@@ -17,24 +17,22 @@ jobs:
         include:
           - goos: windows
             goarch: amd64
+            cgo_enabled: 0
             ext: zip
             bin: lofi.exe
             asset: lofi-radio_Windows_x86_64.zip
           - goos: windows
             goarch: arm64
+            cgo_enabled: 0
             ext: zip
             bin: lofi.exe
             asset: lofi-radio_Windows_arm64.zip
           - goos: linux
             goarch: amd64
+            cgo_enabled: 1
             ext: tar.gz
             bin: lofi
             asset: lofi-radio_Linux_x86_64.tar.gz
-          - goos: linux
-            goarch: arm64
-            ext: tar.gz
-            bin: lofi
-            asset: lofi-radio_Linux_arm64.tar.gz
 
     steps:
       - name: Checkout
@@ -45,9 +43,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install Linux audio build deps
+        if: matrix.goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
       - name: Build binary
         env:
-          CGO_ENABLED: 0
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
@@ -87,4 +91,3 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
-
