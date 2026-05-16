@@ -5,10 +5,12 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -306,9 +308,43 @@ func writeExecutable(source io.Reader, installDir string) (string, error) {
 		}
 	}
 	if err := os.Rename(tempPath, targetPath); err != nil {
+		// Windows can't replace a running .exe. If the target is in use,
+		// stage the new binary and schedule replacement after this process exits.
+		if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
+			fallbackPath := targetPath + ".new"
+			if fallbackErr := os.Rename(tempPath, fallbackPath); fallbackErr != nil {
+				return "", fmt.Errorf("move staged binary into place: %w", fallbackErr)
+			}
+			if scheduleErr := scheduleWindowsReplaceAfterExit(targetPath, fallbackPath, os.Getpid()); scheduleErr != nil {
+				return "", fmt.Errorf("schedule post-exit replacement: %w", scheduleErr)
+			}
+			return targetPath, nil
+		}
 		return "", fmt.Errorf("move binary into place: %w", err)
 	}
 	return targetPath, nil
+}
+
+func scheduleWindowsReplaceAfterExit(targetPath, stagedPath string, pid int) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+
+	// Wait for current PID to disappear, then replace the executable.
+	// Retries help with short-lived AV/file-lock races.
+	command := fmt.Sprintf(`set "PID=%d" && set "SRC=%s" && set "DST=%s" && `+
+		`:wait && tasklist /FI "PID eq %%PID%%" | find "%%PID%%" >nul && (timeout /t 1 /nobreak >nul & goto wait) && `+
+		`for /L %%i in (1,1,30) do (move /Y "%%SRC%%" "%%DST%%" >nul 2>nul && exit /b 0 || timeout /t 1 /nobreak >nul)`,
+		pid,
+		stagedPath,
+		targetPath,
+	)
+
+	cmd := exec.Command("cmd", "/C", command)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func binaryName() string {
