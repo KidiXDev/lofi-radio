@@ -138,7 +138,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 		return fmt.Errorf("create audio context: %w", err)
 	}
 
-	ffmpeg, stdout, ffmpegStderr, err := startPCMFFmpegWithFallback(streamURL)
+	ffmpeg, stdout, ffmpegStderr, err := startPCMFFmpegWithFallback(streamURL, false)
 	if err != nil {
 		return err
 	}
@@ -187,7 +187,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 			writeLog("player.play.restart attempt=%d err=%v wait_err=%v", restarts, err, waitErr)
 			time.Sleep(450 * time.Millisecond)
 
-			nextCmd, nextStream, nextStderr, startErr := startPCMFFmpegWithFallback(streamURL)
+			nextCmd, nextStream, nextStderr, startErr := startPCMFFmpegWithFallback(streamURL, true)
 			if startErr != nil {
 				waitCh <- fmt.Errorf("restart stream failed after %d attempts: %w", restarts, startErr)
 				break
@@ -221,16 +221,21 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	return nil
 }
 
-func startPCMFFmpegWithFallback(streamURL string) (*exec.Cmd, io.Reader, *bytes.Buffer, error) {
+func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool) (*exec.Cmd, io.Reader, *bytes.Buffer, error) {
 	profiles := []pcmProfile{
 		{name: "reconnect", withReconnect: true},
 		{name: "plain", withReconnect: false},
 	}
-	// On YouTube HLS URLs, plain is typically the fastest successful probe.
-	profiles = prioritizeProfiles(profiles, "plain")
-	if raw := preferredPCMProfile.Load(); raw != nil {
-		if lastGood, ok := raw.(string); ok && lastGood != "" {
-			profiles = prioritizeProfiles(profiles, lastGood)
+	if preferReconnect {
+		// Mid-stream recoveries prioritize resilience over startup speed.
+		profiles = prioritizeProfiles(profiles, "reconnect")
+	} else {
+		// Initial connect prioritizes faster first-audio.
+		profiles = prioritizeProfiles(profiles, "plain")
+		if raw := preferredPCMProfile.Load(); raw != nil {
+			if lastGood, ok := raw.(string); ok && lastGood != "" {
+				profiles = prioritizeProfiles(profiles, lastGood)
+			}
 		}
 	}
 
