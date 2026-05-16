@@ -597,10 +597,11 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 	}
 	contentHeight := availableContentHeight(termHeight, rootVerticalPadding, rootGap)
 
-	// Warm sunset pulsing color
+	// Refined pulsing color for the core brand/borders.
 	pulse := a.pulsePhase.Get()
 	t := (math.Sin(pulse) + 1) / 2
-	borderColor := gotui.NewGradient(gotui.Yellow, gotui.Red).At(t)
+	// Sleek sunset: Pinkish-Red to Bright Yellow
+	borderColor := gotui.NewGradient(gotui.RGBColor(255, 40, 100), gotui.RGBColor(255, 200, 40)).At(t)
 
 	root := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
@@ -620,7 +621,7 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 	case viewResolving:
 		mainView = a.renderResolving()
 	case viewPlayer:
-		mainView = a.renderPlayer()
+		mainView = a.renderPlayer(termWidth)
 	case viewError:
 		mainView = a.renderError()
 	}
@@ -645,11 +646,12 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 		gotui.WithMaxHeight(3),
 		gotui.WithFlexShrink(0),
 		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 		gotui.WithPaddingTRBL(0, 2, 0, 2),
+		gotui.WithAlign(gotui.AlignCenter),
 	)
 	footer.AddChild(gotui.New(
-		gotui.WithText(a.footerHint.Get()),
+		gotui.WithText(" "+a.footerHint.Get()),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.White).Dim()),
 	))
 	root.AddChild(footer)
@@ -681,10 +683,26 @@ func (a *app) renderHeader(borderColor gotui.Color) *gotui.Element {
 		gotui.WithGap(1),
 		gotui.WithFlexGrow(1),
 	)
+
+	// Pulsing intensity for the "RADIO" label
+	pulse := a.pulsePhase.Get()
+	glow := (math.Sin(pulse*1.8) + 1) / 2
+	radioStyle := gotui.NewStyle().Bold()
+	if glow > 0.7 {
+		radioStyle = radioStyle.Foreground(gotui.BrightYellow)
+	} else {
+		radioStyle = radioStyle.Foreground(gotui.Yellow)
+	}
+
 	left.AddChild(gotui.New(
-		gotui.WithText("RADIO LOFI"),
+		gotui.WithText("RADIO"),
 		gotui.WithWrap(false),
-		gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.Magenta).WithDirection(gotui.GradientHorizontal)),
+		gotui.WithTextStyle(radioStyle),
+	))
+	left.AddChild(gotui.New(
+		gotui.WithText("LOFI"),
+		gotui.WithWrap(false),
+		gotui.WithTextGradient(gotui.NewGradient(gotui.White, gotui.BrightMagenta).WithDirection(gotui.GradientHorizontal)),
 		gotui.WithTextStyle(gotui.NewStyle().Bold()),
 	))
 	left.AddChild(gotui.New(
@@ -725,7 +743,7 @@ func (a *app) renderBoot() *gotui.Element {
 	box := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 40, 100))),
 		gotui.WithPadding(2),
 		gotui.WithFlexGrow(1),
 		gotui.WithGap(1),
@@ -919,7 +937,7 @@ func (a *app) renderResolving() *gotui.Element {
 	box := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 40, 100))),
 		gotui.WithPadding(2),
 		gotui.WithFlexGrow(1),
 		gotui.WithGap(1),
@@ -942,12 +960,12 @@ func (a *app) renderResolving() *gotui.Element {
 	return box
 }
 
-func (a *app) renderPlayer() *gotui.Element {
+func (a *app) renderPlayer(termWidth int) *gotui.Element {
 	// A flex row with two columns
 	row := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithFlexGrow(1),
-		gotui.WithGap(2),
+		gotui.WithGap(1),
 	)
 
 	// LEFT COLUMN (Station Info & Playback)
@@ -956,7 +974,7 @@ func (a *app) renderPlayer() *gotui.Element {
 		gotui.WithFlexGrow(1),
 		gotui.WithBorder(gotui.BorderRounded),
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-		gotui.WithPadding(2),
+		gotui.WithPaddingTRBL(1, 2, 1, 2),
 		gotui.WithGap(1),
 	)
 
@@ -1003,32 +1021,54 @@ func (a *app) renderPlayer() *gotui.Element {
 	volRow := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithGap(1),
+		gotui.WithAlign(gotui.AlignCenter),
 	)
 	volRow.AddChild(gotui.New(
-		gotui.WithText(renderFancyBar(int64(vol), 100, 20)),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
+		gotui.WithText(renderFancyBar(int64(vol), 100, 24)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(180, 80, 255))),
 	))
 	volRow.AddChild(gotui.New(
 		gotui.WithText(fmt.Sprintf("%d%%", vol)),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
 	))
 	leftCol.AddChild(volRow)
 
 	// RIGHT COLUMN (Visualizer)
+	// We remove the border from the rightCol itself and instead let the inner boxes provide the structure
+	// to save 2 rows of vertical space and reduce visual clutter.
 	rightCol := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithGap(1),
+	)
+
+	decorBox := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithFlexGrow(1),
 		gotui.WithBorder(gotui.BorderRounded),
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-		gotui.WithPadding(2),
+		gotui.WithPaddingTRBL(1, 1, 1, 1),
 	)
+	decorBox.AddChild(a.buildVisualizerDecor(isPaused, termWidth))
 
+	vizHeight := 8
+	vizRows := 5
+	if termWidth >= 145 {
+		vizHeight = 9
+		vizRows = 6
+	}
 	visualizerBox := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithPaddingTRBL(2, 0, 0, 0),
+		gotui.WithHeight(vizHeight),
+		gotui.WithMinHeight(vizHeight),
+		gotui.WithMaxHeight(vizHeight),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		gotui.WithPaddingTRBL(1, 1, 0, 1), // Remove bottom padding to fit bars
 	)
-	visualizerBox.AddChild(a.buildWaveVisualizer(isPaused))
+	visualizerBox.AddChild(a.buildWaveVisualizer(isPaused, termWidth, vizRows))
 
+	rightCol.AddChild(decorBox)
 	rightCol.AddChild(visualizerBox)
 
 	row.AddChild(leftCol)
@@ -1037,15 +1077,17 @@ func (a *app) renderPlayer() *gotui.Element {
 	return row
 }
 
-// vizRows controls how many text rows the spectrum occupies.
-const vizRows = 6
-
 // buildWaveVisualizer renders a real audio-reactive multi-row spectrum analyzer.
 // a.vizBands contains the smoothed band amplitudes, updated every onTick (30fps).
 // Falls back to an animated sine-wave placeholder while buffering.
-func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
+func (a *app) buildWaveVisualizer(paused bool, termWidth, rows int) *gotui.Element {
 	phase := a.wavePhase.Get()
 	numBars := radio.NumBands
+	if termWidth >= 160 {
+		numBars = 48
+	} else if termWidth >= 125 {
+		numBars = 40
+	}
 
 	// Show buffering only until first analyzer frame is observed.
 	// After data exists, keep live spectrum even across brief gaps.
@@ -1054,10 +1096,14 @@ func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 	// Compute per-bar display height.
 	heights := make([]float64, numBars)
 	for i := 0; i < numBars; i++ {
+		src := (i * radio.NumBands) / numBars
+		if src >= radio.NumBands {
+			src = radio.NumBands - 1
+		}
 		if paused {
-			heights[i] = a.vizBands[i] // decayed by onTick
+			heights[i] = a.vizBands[src] // decayed by onTick
 		} else if hasRealData {
-			heights[i] = a.vizBands[i]
+			heights[i] = a.vizBands[src]
 		} else {
 			// Animated sine-wave placeholder while buffering.
 			h := 0.45 +
@@ -1081,20 +1127,19 @@ func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 
 	col := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithJustify(gotui.JustifyEnd),
 		gotui.WithGap(0),
 	)
 
-	// Build rows top→bottom. Row 0 is the top.
-	for row := vizRows - 1; row >= 0; row-- {
-		// This row covers height band [row/vizRows, (row+1)/vizRows].
-		rowLo := float64(row) / float64(vizRows)
-		rowHi := float64(row+1) / float64(vizRows)
-		_ = rowHi
-
+	// Build spectrum rows top→bottom. Row 0 is the top.
+	for row := 0; row < rows; row++ {
 		hLine := gotui.New(
 			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 			gotui.WithGap(0),
 		)
+		rowLo := float64(rows-1-row) / float64(rows)
+		rowHi := float64(rows-row) / float64(rows)
 
 		for i := 0; i < numBars; i++ {
 			h := heights[i]
@@ -1102,36 +1147,39 @@ func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 			if h <= rowLo {
 				// Bar doesn't reach this row.
 				ch = " "
-			} else if h >= float64(row+1)/float64(vizRows) {
+			} else if h >= rowHi {
 				// Full block.
 				ch = "█"
 			} else {
 				// Partial: how far into this row.
-				frac := (h - rowLo) * float64(vizRows)
+				frac := (h - rowLo) * float64(rows)
 				idx := clamp(int(frac*float64(len(subFill)-1)), 0, len(subFill)-1)
 				ch = subFill[idx]
 			}
 
 			// Hue: low bars cyan→blue, high bars yellow→red.
-			// Position hue by bar index + height for lively color.
+			// Smooth sunset gradient: Cyan -> Blue -> Purple -> Red
 			barFrac := float64(i) / float64(numBars)
-			rowFrac := float64(row) / float64(vizRows)
-			hue := 200 - barFrac*80 + heights[i]*120 + rowFrac*40
+			rowFrac := float64(rows-1-row) / float64(rows)
+			
+			// Color calculation for a more dynamic look
+			hue := 180 + barFrac*120 + rowFrac*60
 			hue = math.Mod(hue+phase*8, 360)
 			if hue < 0 {
 				hue += 360
 			}
-			sat := 0.85 + 0.15*heights[i]
-			lit := 0.45 + 0.2*heights[i]
+			sat := 0.75 + 0.25*h
+			lit := 0.40 + 0.25*h
 			if ch == " " {
-				lit = 0.08 // dim empty cells
-				sat = 0.2
-				ch = "·" // subtle dot grid
+				lit = 0.06 // dim background
+				sat = 0.1
+				ch = "·" 
 			}
 			r, g, b := hslToRGB(hue, sat, lit)
 
 			hLine.AddChild(gotui.New(
 				gotui.WithText(ch),
+				gotui.WithFlexGrow(1),
 				gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(r, g, b))),
 			))
 		}
@@ -1139,6 +1187,63 @@ func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 	}
 
 	return col
+}
+
+func (a *app) buildVisualizerDecor(paused bool, termWidth int) *gotui.Element {
+	phase := a.pulsePhase.Get()
+	rows := 5
+	if termWidth < 110 {
+		rows = 4
+	}
+	cols := 34
+	if termWidth >= 150 {
+		cols = 42
+	} else if termWidth < 115 {
+		cols = 28
+	}
+
+	box := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithJustify(gotui.JustifyCenter),
+		gotui.WithGap(0),
+	)
+
+	for r := 0; r < rows; r++ {
+		line := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(0),
+		)
+		rowFrac := float64(r) / float64(max(rows-1, 1))
+		for c := 0; c < cols; c++ {
+			x := float64(c) / float64(max(cols-1, 1))
+			// More complex wave for the background
+			w := 0.5 + 0.4*math.Sin(phase*1.4+x*9.0-rowFrac*2.3) + 0.1*math.Sin(phase*3.1-x*4.5)
+			
+			ch := "·"
+			if w > 0.85 {
+				ch = "•"
+			}
+			if paused && w > 0.92 {
+				ch = "◦"
+			}
+			
+			// Pulsing colors: Deep Navy to Soft Teal/Violet
+			hue := 240 + 40*math.Sin(phase*0.5) + 20*rowFrac + 20*w
+			sat := 0.30 + 0.20*w
+			lit := 0.10 + 0.10*w
+			
+			r8, g8, b8 := hslToRGB(hue, sat, lit)
+			line.AddChild(gotui.New(
+				gotui.WithText(ch),
+				gotui.WithFlexGrow(1),
+				gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(r8, g8, b8))),
+			))
+		}
+		box.AddChild(line)
+	}
+
+	return box
 }
 
 func (a *app) renderError() *gotui.Element {
@@ -1356,8 +1461,8 @@ func availableContentHeight(termHeight, rootVerticalPadding, rootGap int) int {
 	const headerHeight = 3
 	const footerHeight = 3
 	chrome := (rootVerticalPadding * 2) + (rootGap * 2) + headerHeight + footerHeight
-	// Keep one spare row to avoid bottom-row clipping on some terminals.
-	return max(termHeight-chrome-1, 8)
+	// Be more conservative to avoid bottom-row clipping or overlaps.
+	return max(termHeight-chrome-2, 8)
 }
 
 func selectorMaxRows(contentHeight int) int {
