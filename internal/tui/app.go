@@ -78,11 +78,11 @@ type app struct {
 	wavePhase    *gotui.State[float64]
 	pulsePhase   *gotui.State[float64]
 	aniTick      int
-	vizLiveHold  int
 
 	// vizBands holds the smoothed per-band amplitudes updated by onTick.
-	// Plain array (not State) — only accessed from the UI goroutine.
-	vizBands [radio.NumBands]float64
+	vizBands    [radio.NumBands]float64
+	vizHistory  [][4]float64
+	vizLiveHold int
 
 	resolveToken *gotui.State[int]
 	bootCh       chan bootstrap.ProgressEvent
@@ -142,6 +142,7 @@ func newApp(channelName, playlistURL string) *app {
 		resolveToken: gotui.NewState(0),
 		bootCh:       make(chan bootstrap.ProgressEvent, 64),
 		resultCh:     make(chan asyncResult, 8),
+		vizHistory:   make([][4]float64, 0, 128),
 	}
 
 	component.startBootstrap()
@@ -440,6 +441,29 @@ func (a *app) onTick() {
 			a.vizBands[b] += attack * (target - a.vizBands[b])
 		} else {
 			a.vizBands[b] *= decay
+		}
+	}
+
+	// Update real spectrum history (4 bands: Bass, Low-Mid, High-Mid, High)
+	if !paused && (a.player.Viz.HasData() || a.vizLiveHold > 0) {
+		var entry [4]float64
+		step := radio.NumBands / 4
+		for i := 0; i < 4; i++ {
+			sum := 0.0
+			for j := i * step; j < (i+1)*step; j++ {
+				sum += a.vizBands[j]
+			}
+			entry[i] = sum / float64(step)
+		}
+		a.vizHistory = append(a.vizHistory, entry)
+		if len(a.vizHistory) > 128 {
+			a.vizHistory = a.vizHistory[1:]
+		}
+	} else if len(a.vizHistory) > 0 {
+		for i := range a.vizHistory {
+			for j := 0; j < 4; j++ {
+				a.vizHistory[i][j] *= 0.92
+			}
 		}
 	}
 }
@@ -1570,56 +1594,93 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 	)
 
 	decorBox.AddChild(gotui.New(
-		gotui.WithText("● SIGNAL OSCILLOSCOPE"),
+		gotui.WithText("● SPECTRUM WATERFALL (HISTORY)"),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold()),
 	))
-
-	// Create a simple reactive sine wave for the oscilloscope
-	waveRow := gotui.New(
+	
+	// Create a waterfall plot with 4 frequency rows
+	waterfall := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithFlexGrow(1),
 		gotui.WithJustify(gotui.JustifyCenter),
+		gotui.WithGap(0),
 	)
-
-	waveStr := ""
-	pulse := a.pulsePhase.Get()
-	width := (termWidth - 42) - 10
-	if width > 0 {
-		for x := 0; x < width; x++ {
-			y := math.Sin(float64(x)*0.2 + pulse*10.0)
-			if y > 0.6 {
-				waveStr += "⬔"
-			} else if y < -0.6 {
-				waveStr += "⬕"
-			} else {
-				waveStr += "─"
-			}
-		}
+	
+	histChars := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+	maxHistLen := (termWidth - 42) - 10
+	
+	bandLabels := []string{" HI ", " MID", " LOW", " BASS"}
+	bandGradients := []gotui.Gradient{
+		gotui.NewGradient(gotui.RGBColor(200, 100, 255), gotui.RGBColor(255, 100, 200)),
+		gotui.NewGradient(gotui.RGBColor(100, 150, 255), gotui.RGBColor(150, 100, 255)),
+		gotui.NewGradient(gotui.RGBColor(50, 200, 200), gotui.RGBColor(100, 200, 255)),
+		gotui.NewGradient(gotui.RGBColor(50, 255, 150), gotui.RGBColor(50, 200, 200)),
 	}
-	waveRow.AddChild(gotui.New(
-		gotui.WithText(waveStr),
-		gotui.WithTextGradient(gotui.NewGradient(gotui.RGBColor(50, 100, 255), gotui.RGBColor(50, 255, 100))),
-	))
 
-	// Add some technical labels to the decor box
+	for i := 0; i < 4; i++ {
+		row := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(1),
+		)
+		
+		row.AddChild(gotui.New(
+			gotui.WithText(bandLabels[i]),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim().Bold()),
+		))
+		
+		if maxHistLen > 8 {
+			history := a.vizHistory
+			histWidth := maxHistLen - 6
+			if len(history) > histWidth {
+				history = history[len(history)-histWidth:]
+			}
+			
+			graphStr := ""
+			for _, entry := range history {
+				// Reverse i for display (HI at top, BASS at bottom)
+				val := entry[3-i] 
+				// Auto-scale a bit for better visibility
+				val *= 1.4 
+				idx := int(val * float64(len(histChars)-1))
+				if idx < 0 { idx = 0 }
+				if idx >= len(histChars) { idx = len(histChars) - 1 }
+				graphStr += histChars[idx]
+			}
+			row.AddChild(gotui.New(
+				gotui.WithText(graphStr),
+				gotui.WithTextGradient(bandGradients[i]),
+			))
+		}
+		waterfall.AddChild(row)
+	}
+	
+	// Add technical labels to the bottom of decor box
 	statsRow := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithGap(4),
 	)
-	statsRow.AddChild(gotui.New(
-		gotui.WithText("SOURCE: REMOTE/TCP"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-	statsRow.AddChild(gotui.New(
-		gotui.WithText("ENCODER: LAME MP3"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-	statsRow.AddChild(gotui.New(
-		gotui.WithText("BUFFER: 2500MS"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
+	
+	peak := 0.0
+	for _, entry := range a.vizHistory {
+		for _, v := range entry {
+			if v > peak { peak = v }
+		}
+	}
 
-	decorBox.AddChild(waveRow)
+	statsRow.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("PEAK: %.2f", peak)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+	statsRow.AddChild(gotui.New(
+		gotui.WithText("DSP: 32-BAND FFT"),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+	statsRow.AddChild(gotui.New(
+		gotui.WithText("RES: 33MS / 128PT"),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+	
+	decorBox.AddChild(waterfall)
 	decorBox.AddChild(statsRow)
 
 	// Bottom: Wave Visualizer
