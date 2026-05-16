@@ -5,6 +5,7 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 ![Go Version](https://img.shields.io/badge/Go-1.25.1-00ADD8?style=flat-square&logo=go)
 ![License](https://img.shields.io/badge/License-GPLv3-green?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-orange?style=flat-square)
+![Downloads](https://img.shields.io/github/downloads/KidiXDev/lofi-radio/total?style=flat-square&logo=github)
 
 <p align="center">
   <img src="screenshots/img1.png" alt="Lofi Radio UI" width="800">
