@@ -511,38 +511,40 @@ func (a *app) emitResult(result asyncResult) {
 func (a *app) Render(ui *gotui.App) *gotui.Element {
 	_ = ui
 
-	// Pulsing border color: oscillates between cyan and purple
+	// Pulsing border: cyan ↔ magenta
 	pulse := a.pulsePhase.Get()
 	t := (math.Sin(pulse) + 1) / 2
-	purple, _ := gotui.HexColor("#9B59B6")
-	borderColor := gotui.NewGradient(gotui.Cyan, purple).At(t)
+	borderColor := gotui.NewGradient(gotui.Cyan, gotui.Magenta).At(t)
 
 	root := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithHeightPercent(100),
 		gotui.WithBorder(gotui.BorderRounded),
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(borderColor)),
-		gotui.WithPaddingTRBL(1, 2, 1, 2),
-		gotui.WithGap(1),
+		gotui.WithPaddingTRBL(0, 1, 0, 1),
+		gotui.WithGap(0),
 	)
 
-	// Header row: title + spinner
+	// ── Header ──────────────────────────────────────────────
+	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 	header := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(2),
+		gotui.WithGap(1),
+		gotui.WithPaddingTRBL(1, 0, 0, 0),
 	)
 	header.AddChild(gotui.New(
-		gotui.WithText("◈ LOFI RADIO"),
+		gotui.WithText("♫ LOFI RADIO"),
 		gotui.WithTextGradient(gotui.NewGradient(gotui.Cyan, gotui.Magenta).WithDirection(gotui.GradientHorizontal)),
 		gotui.WithTextStyle(gotui.NewStyle().Bold()),
 	))
 	header.AddChild(gotui.New(
-		gotui.WithText(a.modeLabel()),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim().Italic()),
+		gotui.WithText(spin),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 	))
 	root.AddChild(header)
 	root.AddChild(gotui.New(gotui.WithHR()))
 
+	// ── Content ─────────────────────────────────────────────
 	content := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithFlexGrow(1),
@@ -561,10 +563,12 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 	}
 	root.AddChild(content)
 
+	// ── Footer ──────────────────────────────────────────────
 	root.AddChild(gotui.New(gotui.WithHR()))
 	root.AddChild(gotui.New(
 		gotui.WithText(a.footerHint.Get()),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		gotui.WithPaddingTRBL(0, 0, 1, 0),
 	))
 
 	return root
@@ -573,22 +577,13 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 var spinnerBraille = []string{"⠋", "⠙", "⠸", "⠴", "⠦", "⠇"}
 
 func (a *app) renderBoot() *gotui.Element {
-	box := contentBox()
-
+	box := bareBox()
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
-	statusRow := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(1),
-	)
-	statusRow.AddChild(gotui.New(
-		gotui.WithText(spin),
+
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("%s  %s", spin, a.status.Get())),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Cyan)),
 	))
-	statusRow.AddChild(gotui.New(
-		gotui.WithText(a.status.Get()),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite)),
-	))
-	box.AddChild(statusRow)
 
 	event := a.bootEvent.Get()
 	if event.Type == bootstrap.ProgressEventDownload {
@@ -601,37 +596,32 @@ func (a *app) renderBoot() *gotui.Element {
 			totalLabel = humanBytes(event.Download.TotalBytes)
 		}
 		box.AddChild(gotui.New(
-			gotui.WithText(fmt.Sprintf("%-10s %s", label, renderFancyBar(event.Download.BytesReceived, event.Download.TotalBytes, 32))),
+			gotui.WithText(fmt.Sprintf("  %s  %s", label, renderFancyBar(event.Download.BytesReceived, event.Download.TotalBytes, 24))),
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan)),
 		))
 		box.AddChild(gotui.New(
-			gotui.WithText(fmt.Sprintf("  Data   %s / %s", humanBytes(event.Download.BytesReceived), totalLabel)),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-		))
-		box.AddChild(gotui.New(
-			gotui.WithText(fmt.Sprintf("  Speed  %s  ETA %s", humanSpeed(event.Download.SpeedPerSec), humanDuration(event.Download.ETA))),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+			gotui.WithText(fmt.Sprintf("  %s / %s   %s", humanBytes(event.Download.BytesReceived), totalLabel, humanSpeed(event.Download.SpeedPerSec))),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 		))
 	}
-
 	return box
 }
 
 func (a *app) renderSelector() *gotui.Element {
-	box := contentBox()
+	box := bareBox()
 	stations := a.stations.Get()
 	selected := clamp(a.selected.Get(), 0, max(len(stations)-1, 0))
 
 	if len(stations) == 0 {
 		box.AddChild(gotui.New(
-			gotui.WithText("No stations available."),
+			gotui.WithText("  No stations available."),
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 		))
 		return box
 	}
 
+	maxRows := 14
 	start := 0
-	maxRows := 12
 	if selected >= maxRows {
 		start = selected - maxRows + 1
 	}
@@ -648,139 +638,105 @@ func (a *app) renderSelector() *gotui.Element {
 				gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Cyan).Bold()),
 			))
 			row.AddChild(gotui.New(
-				gotui.WithText(compactText(stations[i].Title, 66)),
-				gotui.WithTextGradient(gotui.NewGradient(gotui.BrightCyan, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
+				gotui.WithText(compactText(stations[i].Title, 60)),
+				gotui.WithTextGradient(gotui.NewGradient(gotui.Cyan, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
 				gotui.WithTextStyle(gotui.NewStyle().Bold()),
 			))
 			box.AddChild(row)
 		} else {
+			dim := gotui.NewStyle().Foreground(gotui.BrightBlack)
 			box.AddChild(gotui.New(
-				gotui.WithText(fmt.Sprintf("  %s", compactText(stations[i].Title, 68))),
-				gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+				gotui.WithText(fmt.Sprintf("  %s", compactText(stations[i].Title, 62))),
+				gotui.WithTextStyle(dim),
 			))
 		}
 	}
 
-	box.AddChild(gotui.New(gotui.WithHR()))
-	box.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("  %d / %d stations", selected+1, len(stations))),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-
+	// Scrollbar hint: show position only when list is longer than visible
+	if len(stations) > maxRows {
+		box.AddChild(gotui.New(
+			gotui.WithText(fmt.Sprintf("  — %d/%d —", selected+1, len(stations))),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
+	}
 	return box
 }
 
 func (a *app) renderResolving() *gotui.Element {
-	box := contentBox()
+	box := bareBox()
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
-
-	row := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(2),
-	)
-	row.AddChild(gotui.New(
-		gotui.WithText(spin),
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("%s  Resolving stream...", spin)),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
 	))
-	row.AddChild(gotui.New(
-		gotui.WithText("Resolving stream URL..."),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite)),
-	))
-	box.AddChild(row)
 	box.AddChild(gotui.New(
-		gotui.WithText("  This may take a few seconds depending on network."),
+		gotui.WithText("  This may take a moment."),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 	))
 	return box
 }
 
 func (a *app) renderPlayer() *gotui.Element {
-	box := contentBox()
+	box := bareBox()
 	station := a.currentStation.Get()
 	isPaused := a.paused.Get()
+	phase := a.pulsePhase.Get()
 
-	// === Top: album art + info panel side-by-side ===
-	topRow := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(2),
+	// ── Station title (gradient, bold, truncated) ──────────
+	titleColor := gotui.NewGradient(gotui.Cyan, gotui.Magenta).At(
+		(math.Sin(phase)*0.5 + 0.5),
 	)
-
-	// ASCII album art panel
-	artColor := gotui.NewGradient(gotui.Cyan, gotui.Magenta).At(
-		(math.Sin(a.pulsePhase.Get()) + 1) / 2,
-	)
-	artLines := []string{
-		"╭───────╮",
-		"│  ◉◉◉  │",
-		"│ ◉   ◉ │",
-		"│  ◉◉◉  │",
-		"╰───────╯",
-	}
-	artBox := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithGap(0),
-	)
-	for _, line := range artLines {
-		artBox.AddChild(gotui.New(
-			gotui.WithText(line),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(artColor)),
-		))
-	}
-	topRow.AddChild(artBox)
-
-	// Info panel
-	infoBox := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-		gotui.WithGap(1),
-	)
-	infoBox.AddChild(gotui.New(
-		gotui.WithText(compactText(station.Title, 50)),
-		gotui.WithTextGradient(gotui.NewGradient(gotui.BrightCyan, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("  %s", compactText(station.Title, 58))),
+		gotui.WithTextGradient(gotui.NewGradient(gotui.Cyan, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
 		gotui.WithTextStyle(gotui.NewStyle().Bold()),
 	))
-	// Status badge
-	statusText := "▶  PLAYING"
-	statusStyle := gotui.NewStyle().Foreground(gotui.BrightGreen).Bold()
+	_ = titleColor
+
+	// ── Status + elapsed on one line ───────────────────────
+	statusText := "▶ playing"
+	statusStyle := gotui.NewStyle().Foreground(gotui.BrightGreen)
 	if isPaused {
-		statusText = "⏸  PAUSED"
-		statusStyle = gotui.NewStyle().Foreground(gotui.BrightYellow).Bold()
+		statusText = "⏸ paused"
+		statusStyle = gotui.NewStyle().Foreground(gotui.BrightYellow)
 	}
-	infoBox.AddChild(gotui.New(
-		gotui.WithText(statusText),
-		gotui.WithTextStyle(statusStyle),
+	infoRow := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithGap(3),
+	)
+	infoRow.AddChild(gotui.New(
+		gotui.WithText("  "+statusText),
+		gotui.WithTextStyle(statusStyle.Bold()),
 	))
-	infoBox.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("  Time   %s", a.playbackElapsed())),
+	infoRow.AddChild(gotui.New(
+		gotui.WithText(a.playbackElapsed()),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 	))
-	topRow.AddChild(infoBox)
-	box.AddChild(topRow)
+	box.AddChild(infoRow)
 
 	box.AddChild(gotui.New(gotui.WithHR()))
 
-	// === Wave visualizer ===
-	wave := a.buildWaveVisualizer(isPaused)
-	box.AddChild(wave)
+	// ── Wave visualizer ─────────────────────────────────────
+	box.AddChild(a.buildWaveVisualizer(isPaused))
 
 	box.AddChild(gotui.New(gotui.WithHR()))
 
-	// === Volume bar ===
+	// ── Volume bar ──────────────────────────────────────────
 	vol := a.volume.Get()
 	volRow := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithGap(1),
 	)
 	volRow.AddChild(gotui.New(
-		gotui.WithText("  VOL"),
+		gotui.WithText("  vol"),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 	))
 	volRow.AddChild(gotui.New(
-		gotui.WithText(renderFancyBar(int64(vol), 100, 28)),
+		gotui.WithText(renderFancyBar(int64(vol), 100, 24)),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Cyan)),
 	))
 	volRow.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("%3d%%", vol)),
+		gotui.WithText(fmt.Sprintf("%d%%", vol)),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite)),
 	))
 	box.AddChild(volRow)
@@ -789,26 +745,26 @@ func (a *app) renderPlayer() *gotui.Element {
 }
 
 // buildWaveVisualizer renders an animated ASCII frequency-bar visualizer.
+// Bar count adapts: use a reasonable default (20) that fits narrow terminals.
 func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 	phase := a.wavePhase.Get()
-	numBars := 32
+	numBars := 20
 	barChars := []string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 
 	row := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(0),
+		gotui.WithGap(1),
 	)
 
 	for i := 0; i < numBars; i++ {
 		var height float64
 		if paused {
-			height = 0.1 + 0.05*math.Sin(float64(i)*0.8)
+			height = 0.08 + 0.04*math.Sin(float64(i)*0.9)
 		} else {
-			// Multi-frequency superposition for organic look
 			height = 0.5 +
-				0.3*math.Sin(float64(i)*0.6+phase) +
-				0.15*math.Sin(float64(i)*1.3+phase*1.7) +
-				0.05*math.Sin(float64(i)*2.1+phase*2.3)
+				0.28*math.Sin(float64(i)*0.55+phase) +
+				0.14*math.Sin(float64(i)*1.2+phase*1.6) +
+				0.08*math.Sin(float64(i)*2.0+phase*2.2)
 			if height < 0 {
 				height = 0
 			}
@@ -816,23 +772,12 @@ func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 				height = 1
 			}
 		}
-
-		barIdx := int(height * float64(len(barChars)-1))
-		if barIdx < 0 {
-			barIdx = 0
-		}
-		if barIdx >= len(barChars) {
-			barIdx = len(barChars) - 1
-		}
-
-		// Colour: hue shifts across bars + animated phase
-		hue := math.Mod(float64(i)*11+phase*30, 360)
-		r, g, b := hslToRGB(hue, 0.9, 0.55)
-		barColor := gotui.RGBColor(r, g, b)
-
+		barIdx := clamp(int(height*float64(len(barChars)-1)), 0, len(barChars)-1)
+		hue := math.Mod(float64(i)*18+phase*25, 360)
+		r, g, b := hslToRGB(hue, 0.85, 0.55)
 		row.AddChild(gotui.New(
 			gotui.WithText(barChars[barIdx]),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(barColor)),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(r, g, b))),
 		))
 	}
 	return row
@@ -842,20 +787,24 @@ func (a *app) renderError() *gotui.Element {
 	box := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithFlexGrow(1),
-		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightRed)),
-		gotui.WithPadding(1),
+		gotui.WithPaddingTRBL(1, 0, 0, 0),
 		gotui.WithGap(1),
 	)
 	box.AddChild(gotui.New(
-		gotui.WithText("✖  Error"),
+		gotui.WithText("  ✖  "+strings.TrimSpace(a.errMessage.Get())),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightRed).Bold()),
 	))
-	box.AddChild(gotui.New(
-		gotui.WithText(strings.TrimSpace(a.errMessage.Get())),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite)),
-	))
 	return box
+}
+
+// bareBox is a borderless flex column that fills available space.
+func bareBox() *gotui.Element {
+	return gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithPaddingTRBL(1, 0, 0, 0),
+		gotui.WithGap(1),
+	)
 }
 
 func contentBox() *gotui.Element {
