@@ -1346,25 +1346,77 @@ func (a *app) renderResolving() *gotui.Element {
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithBorder(gotui.BorderRounded),
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 40, 100))),
-		gotui.WithPadding(2),
+		gotui.WithPaddingTRBL(1, 2, 1, 2),
 		gotui.WithFlexGrow(1),
-		gotui.WithGap(1),
+		gotui.WithGap(0),
+		gotui.WithAlign(gotui.AlignCenter),
+		gotui.WithJustify(gotui.JustifyCenter),
 	)
 
+	// Get resolving info
+	categories := a.categories.Get()
+	selected := a.selected.Get()
+	categoryTitle := "Unknown Station"
+	if selected >= 0 && selected < len(categories) {
+		categoryTitle = compactText(categories[selected].Title, 64)
+	}
+
+	// 1. ASCII Header
+	box.AddChild(renderASCIIBlock([]string{
+		` _____ _   _ _   _ ___ _   _  ____ `,
+		`|_   _| | | | \ | |_ _| \ | |/ ___|`,
+		`  | | | | | |  \| || ||  \| | |  _ `,
+		`  | | | |_| | |\  || || |\  | |_| |`,
+		`  |_|  \___/|_| \_|___|_| \_|\____|`,
+	}))
+
+	box.AddChild(gotui.New(gotui.WithHeight(1)))
+
+	// 2. Station Info
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("CHANNEL : %s", strings.ToUpper(a.channelName))),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+	))
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("STATION : %s", strings.ToUpper(categoryTitle))),
+		gotui.WithTextStyle(gotui.NewStyle().Bold().Foreground(gotui.BrightWhite)),
+	))
+
+	box.AddChild(gotui.New(gotui.WithHeight(1)))
+
+	// 3. Pulsing signal animation
+	pulse := a.pulsePhase.Get()
+	animRow := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithGap(2),
+		gotui.WithAlign(gotui.AlignCenter),
+		gotui.WithHeight(1),
+	)
+	for i := 0; i < 7; i++ {
+		dist := math.Abs(float64(i) - 3)
+		active := math.Sin(pulse*6.0-dist*1.5) > 0.4
+		char := "⠂"
+		style := gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()
+		if active {
+			char = "⦿"
+			style = gotui.NewStyle().Foreground(gotui.BrightMagenta).Bold()
+		}
+		animRow.AddChild(gotui.New(
+			gotui.WithText(char),
+			gotui.WithTextStyle(style),
+		))
+	}
+	box.AddChild(animRow)
+
+	box.AddChild(gotui.New(gotui.WithHeight(1)))
+
+	// 4. Status
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 	box.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("%s  Connecting to server...", spin)),
+		gotui.WithText(fmt.Sprintf("%s  ESTABLISHING HIGH-QUALITY LINK...", spin)),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
 	))
-	box.AddChild(gotui.New(
-		gotui.WithText("  This may take a moment."),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-	box.AddChild(gotui.New(gotui.WithHR()))
-	box.AddChild(gotui.New(
-		gotui.WithText("  Press q to cancel and return to category list."),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
+
 	return box
 }
 

@@ -10,7 +10,6 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 
 - **Interactive Full-Screen TUI**: Built on [`go-tui`](https://github.com/grindlemire/go-tui) with clean category picker and now-playing screen.
 - **Auto-Discovery**: Fetches currently available categories from the selected channel playlist.
-- **Scalable Channel Config**: Channels are defined in a centralized config catalog and selected by id.
 - **Lightweight**: Minimal CPU and memory footprint compared to browser-based playback.
 
 ## 📻 Supported Channels
