@@ -1,6 +1,6 @@
 # 🎧 Lofi Radio
 
-A sleek, lightweight command-line interface for streaming high-quality Lofi music. Built with Go, powered by `yt-dlp`, `ffmpeg`, and `go-tui`.
+A sleek, lightweight command-line interface for streaming high-quality Lofi music. Built with Go, powered by `yt-dlp`, `ffmpeg`, `oto`, and `go-tui`.
 
 ![Go Version](https://img.shields.io/badge/Go-1.25.1-00ADD8?style=flat-square&logo=go)
 ![License](https://img.shields.io/badge/License-GPLv3-green?style=flat-square)
@@ -35,7 +35,8 @@ Planned channel roadmap:
 
 ### Dependencies
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp): For extracting audio streams from YouTube.
-- [FFmpeg/FFplay](https://ffmpeg.org/): For high-performance audio playback.
+- [FFmpeg](https://ffmpeg.org/): For audio decoding.
+- [oto](https://github.com/hajimehoshi/oto): For low-level audio playback.
 - [go-tui](https://github.com/grindlemire/go-tui): For the terminal UI framework.
 
 ## 📦 Installation
