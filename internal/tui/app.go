@@ -535,7 +535,6 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 		gotui.WithJustify(gotui.JustifyStart),
 		gotui.WithGap(rootGap),
 		gotui.WithPaddingTRBL(rootVerticalPadding, rootHorizontalPadding, rootVerticalPadding, rootHorizontalPadding),
-		gotui.WithOverflow(gotui.OverflowHidden),
 	)
 
 	root.AddChild(a.renderHeader(borderColor))
@@ -559,7 +558,6 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 		gotui.WithMaxHeight(contentHeight),
 		gotui.WithFlexShrink(0),
 		gotui.WithJustify(gotui.JustifyStart),
-		gotui.WithOverflow(gotui.OverflowHidden),
 	)
 	if mainView != nil {
 		mainSlot.AddChild(mainView)
@@ -709,32 +707,28 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 		gotui.WithFlexGrow(1),
 		gotui.WithGap(rowGap),
 		gotui.WithMinHeight(0),
-		gotui.WithOverflow(gotui.OverflowHidden),
 	)
 
 	stations := a.stations.Get()
 	selected := clamp(a.selected.Get(), 0, max(len(stations)-1, 0))
 	maxRows := selectorMaxRows(contentHeight)
 
-	sidebarWidth := 34.0
-	if termWidth < 120 {
-		sidebarWidth = 36.0
-	}
-	if termWidth < 100 {
-		sidebarWidth = 40.0
+	sidebarWidth := 40
+	if termWidth >= 120 {
+		sidebarWidth = 42
+	} else if termWidth >= 100 {
+		sidebarWidth = 38
 	}
 
-	compactSidebar := contentHeight < 23
 	ultraCompactSidebar := contentHeight < 18
 
 	// Left: station browser panel
 	left := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithWidthPercent(sidebarWidth),
+		gotui.WithWidth(sidebarWidth),
 		gotui.WithMinWidth(28),
 		gotui.WithFlexShrink(0),
 		gotui.WithMinHeight(0),
-		gotui.WithOverflow(gotui.OverflowHidden),
 		gotui.WithBorder(gotui.BorderRounded),
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
 		gotui.WithPadding(1),
@@ -771,34 +765,6 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 		))
 	}
-	if !compactSidebar {
-		left.AddChild(gotui.New(gotui.WithHR()))
-		left.AddChild(gotui.New(
-			gotui.WithText(" ENTER: play"),
-			gotui.WithWrap(false),
-			gotui.WithTruncate(true),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-		))
-		left.AddChild(gotui.New(
-			gotui.WithText(" UP/DOWN or k/j: navigate"),
-			gotui.WithWrap(false),
-			gotui.WithTruncate(true),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-		))
-		left.AddChild(gotui.New(
-			gotui.WithText(" q or Esc: quit"),
-			gotui.WithWrap(false),
-			gotui.WithTruncate(true),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-		))
-	} else {
-		left.AddChild(gotui.New(
-			gotui.WithText(" ENTER play | UP/DOWN navigate | q quit"),
-			gotui.WithWrap(false),
-			gotui.WithTruncate(true),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-		))
-	}
 
 	// Right: station list
 	right := gotui.New(
@@ -806,7 +772,6 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 		gotui.WithFlexGrow(1),
 		gotui.WithMinWidth(0),
 		gotui.WithMinHeight(0),
-		gotui.WithOverflow(gotui.OverflowHidden),
 		gotui.WithBorder(gotui.BorderRounded),
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Yellow)),
 		gotui.WithPadding(1),
@@ -1259,7 +1224,8 @@ func availableContentHeight(termHeight, rootVerticalPadding, rootGap int) int {
 	const headerHeight = 3
 	const footerHeight = 3
 	chrome := (rootVerticalPadding * 2) + (rootGap * 2) + headerHeight + footerHeight
-	return max(termHeight-chrome, 8)
+	// Keep one spare row to avoid bottom-row clipping on some terminals.
+	return max(termHeight-chrome-1, 8)
 }
 
 func selectorMaxRows(contentHeight int) int {
