@@ -128,9 +128,9 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	}
 
 	if u, err := url.Parse(streamURL); err == nil {
-		writeLog("player.play.start host=%q path=%q volume=%d", u.Host, u.Path, volume)
+		writeLog("playback.connecting host=%q volume=%d", u.Host, volume)
 	} else {
-		writeLog("player.play.start volume=%d", volume)
+		writeLog("playback.connecting volume=%d", volume)
 	}
 
 	ctx, err := oto.NewContext(pcmSampleRate, pcmChannels, 2, pcmChunkBytes*4)
@@ -138,12 +138,15 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 		return fmt.Errorf("create audio context: %w", err)
 	}
 
-	ffmpeg, stdout, ffmpegStderr, err := startPCMFFmpegWithFallback(streamURL, false)
+	connectStartedAt := time.Now()
+	ffmpeg, stdout, ffmpegStderr, profileName, err := startPCMFFmpegWithFallback(streamURL, false)
 	if err != nil {
+		writeLog("playback.connect_failed err=%v", err)
 		return err
 	}
+	writeLog("playback.connected profile=%q startup_ms=%d", profileName, time.Since(connectStartedAt).Milliseconds())
 	if ffmpeg.Process != nil {
-		writeLog("player.play.ffmpeg_started pid=%d", ffmpeg.Process.Pid)
+		writeLog("playback.process_started pid=%d", ffmpeg.Process.Pid)
 	}
 
 	audioPlayer := ctx.NewPlayer()
@@ -184,14 +187,17 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 			// Any EOF / ffmpeg exit during live playback is treated as transient:
 			// attempt fast restart on the same stream URL.
 			restarts++
-			writeLog("player.play.restart attempt=%d err=%v wait_err=%v", restarts, err, waitErr)
+			writeLog("playback.interrupted attempt=%d err=%v", restarts, firstNonNilErr(err, waitErr))
+			restartStartedAt := time.Now()
 			time.Sleep(450 * time.Millisecond)
 
-			nextCmd, nextStream, nextStderr, startErr := startPCMFFmpegWithFallback(streamURL, true)
+			nextCmd, nextStream, nextStderr, profileName, startErr := startPCMFFmpegWithFallback(streamURL, true)
 			if startErr != nil {
+				writeLog("playback.reconnect_failed attempt=%d err=%v", restarts, startErr)
 				waitCh <- fmt.Errorf("restart stream failed after %d attempts: %w", restarts, startErr)
 				break
 			}
+			writeLog("playback.resumed attempt=%d profile=%q downtime_ms=%d", restarts, profileName, time.Since(restartStartedAt).Milliseconds())
 
 			p.mu.Lock()
 			p.cmd = nextCmd
@@ -221,7 +227,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	return nil
 }
 
-func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool) (*exec.Cmd, io.Reader, *bytes.Buffer, error) {
+func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool) (*exec.Cmd, io.Reader, *bytes.Buffer, string, error) {
 	profiles := []pcmProfile{
 		{name: "reconnect", withReconnect: true},
 		{name: "plain", withReconnect: false},
@@ -244,7 +250,6 @@ func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool) (*exec.C
 		ffmpeg, stdout, stderrBuf, err := startPCMFFmpeg(streamURL, profile.withReconnect)
 		if err != nil {
 			lastErr = err
-			writeLog("player.play.ffmpeg_profile_failed profile=%q err=%v", profile.name, err)
 			continue
 		}
 
@@ -252,27 +257,17 @@ func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool) (*exec.C
 		probeBytes, probeErr := readFirstPCMChunk(stdout, ffmpeg, 8*time.Second)
 		if probeErr != nil {
 			lastErr = probeErr
-			msg := ""
-			if stderrBuf != nil {
-				msg = strings.TrimSpace(stderrBuf.String())
-			}
-			if msg != "" {
-				writeLog("player.play.ffmpeg_profile_probe_failed profile=%q err=%v stderr=%q", profile.name, probeErr, msg)
-			} else {
-				writeLog("player.play.ffmpeg_profile_probe_failed profile=%q err=%v", profile.name, probeErr)
-			}
 			continue
 		}
 
-		writeLog("player.play.ffmpeg_profile_ok profile=%q first_chunk=%d", profile.name, len(probeBytes))
 		preferredPCMProfile.Store(profile.name)
 		stream := io.MultiReader(bytes.NewReader(probeBytes), stdout)
-		return ffmpeg, stream, stderrBuf, nil
+		return ffmpeg, stream, stderrBuf, profile.name, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("unable to start ffmpeg")
 	}
-	return nil, nil, nil, lastErr
+	return nil, nil, nil, "", lastErr
 }
 
 func prioritizeProfiles(profiles []pcmProfile, preferred string) []pcmProfile {
@@ -350,16 +345,6 @@ func startPCMFFmpeg(streamURL string, withReconnect bool) (*exec.Cmd, io.ReadClo
 	args := []string{
 		"-loglevel", "error",
 		"-nostdin",
-		// "-fflags", "+nobuffer",
-		// "-flags", "low_delay",
-		// "-flush_packets", "1",
-		// "-max_delay", "0",
-		// "-max_probe_packets", "1",
-		// "-rw_timeout", "15000000",
-		// "-reconnect_on_network_error", "1",
-		// "-reconnect_on_http_error", "4xx,5xx",
-		// "-probesize", "32k",
-		// "-analyzeduration", "0",
 	}
 	if withReconnect {
 		args = append(args,
@@ -410,8 +395,6 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 	loudEnv := 0.0
 	loudRef := 0.14
 	lowBandEnv := 0.0
-	frames := 0
-	lastLog := time.Now()
 	bandRanges := buildBandRanges(fftSize, pcmSampleRate, NumBands, minFreqHz, maxFreqHz)
 	window := hannWindow(fftSize)
 	for i := range binNorm {
@@ -422,9 +405,8 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 		n, err := io.ReadAtLeast(r, rawBuf, 2)
 		if err != nil {
 			if (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) && n >= 2 {
-				// Keep processing trailing bytes instead of dropping the last frame.
+				// Just ignore for now
 			} else {
-				writeLog("pcm.pipeline.read_error err=%v", err)
 				return err
 			}
 		}
@@ -607,19 +589,13 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 			loudEnv += 0.45 * (envTarget - loudEnv)
 		}
 		loudGain := 0.05 + 0.95*loudEnv
-		for b := 0; b < NumBands; b++ {
+		for b := range NumBands {
 			out[b] *= loudGain
 		}
 
 		p.Viz.set(out)
 		if _, err := audioOut.Write(playBuf); err != nil {
 			return fmt.Errorf("write audio: %w", err)
-		}
-		frames++
-		if time.Since(lastLog) >= 5*time.Second {
-			writeLog("pcm.pipeline.heartbeat frames=%d", frames)
-			frames = 0
-			lastLog = time.Now()
 		}
 	}
 }
@@ -776,7 +752,7 @@ func (p *Player) Stop() error {
 		p.Viz.set([NumBands]float64{})
 		return nil
 	}
-	writeLog("player.stop")
+	writeLog("playback.stopping")
 
 	if cmd.Process != nil {
 		_ = cmd.Process.Kill()
@@ -795,8 +771,15 @@ func (p *Player) Stop() error {
 		_ = ctx.Close()
 	}
 	p.Viz.set([NumBands]float64{})
-	writeLog("player.stop.ffmpeg_killed")
+	writeLog("playback.stopped")
 	return nil
+}
+
+func firstNonNilErr(primary error, fallback error) error {
+	if primary != nil {
+		return primary
+	}
+	return fallback
 }
 
 func (p *Player) IsRunning() bool {
