@@ -40,7 +40,12 @@ func GetDirectAudioURL(videoURL string) (string, error) {
 	}
 	if err != nil {
 		writeLog("stream.resolve.error err=%v stderr=%q", err, stderr)
-		return "", fmt.Errorf("yt-dlp stream error: %w\n%s", err, stderr)
+		return "", newYtDlpFriendlyError(
+			"stream.resolve",
+			err,
+			stderr,
+			"Failed to resolve this category stream.",
+		)
 	}
 
 	streamURL := strings.TrimSpace(stdout)

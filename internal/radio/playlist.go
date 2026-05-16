@@ -1,7 +1,6 @@
 package radio
 
 import (
-	"fmt"
 	"github.com/kidixdev/lofi-radio/internal/utils"
 	"strings"
 )
@@ -14,7 +13,12 @@ func FetchCategoriesFromPlaylist(playlistURL string) ([]Category, error) {
 		playlistURL,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("yt-dlp playlist error: %w\n%s", err, stderr)
+		return nil, newYtDlpFriendlyError(
+			"playlist.fetch",
+			err,
+			stderr,
+			"Failed to load categories for this channel.",
+		)
 	}
 
 	lines := strings.Split(stdout, "\n")
@@ -51,7 +55,10 @@ func FetchCategoriesFromPlaylist(playlistURL string) ([]Category, error) {
 	}
 
 	if len(categories) == 0 {
-		return nil, fmt.Errorf("playlist has no currently available videos")
+		return nil, &FriendlyError{
+			Op:      "playlist.fetch",
+			Message: "This channel has no categories available right now.",
+		}
 	}
 
 	return categories, nil

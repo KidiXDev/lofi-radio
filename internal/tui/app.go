@@ -268,7 +268,8 @@ func (a *app) onAsyncResult(result asyncResult) {
 
 	case asyncFetchCategories:
 		if result.err != nil {
-			a.setTransientError(fmt.Sprintf("failed to fetch categories: %v", result.err))
+			radio.LogErrorDetails(result.err)
+			a.setTransientError(radio.UserMessage(result.err))
 			return
 		}
 
@@ -293,7 +294,8 @@ func (a *app) onAsyncResult(result asyncResult) {
 
 		if result.err != nil {
 			radio.Logf("ui.resolve.error err=%v", result.err)
-			a.setTransientError(fmt.Sprintf("stream resolution failed: %v", result.err))
+			radio.LogErrorDetails(result.err)
+			a.setTransientError(radio.UserMessage(result.err))
 			return
 		}
 
@@ -326,7 +328,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 		}
 		if result.err != nil {
 			radio.Logf("ui.play.error category=%q err=%v", result.category.Title, result.err)
-			a.setTransientError(fmt.Sprintf("playback failed: %v", result.err))
+			a.setTransientError("Playback failed. Please try another category.")
 			return
 		}
 
@@ -375,7 +377,7 @@ func (a *app) onTick() {
 			if !ok || err == nil {
 				a.setTransientError("playback stopped")
 			} else {
-				a.setTransientError(fmt.Sprintf("playback failed: %v", err))
+				a.setTransientError("Playback failed. Please try another category.")
 			}
 			return
 		default:
