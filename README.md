@@ -6,6 +6,10 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 ![License](https://img.shields.io/badge/License-GPLv3-green?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-orange?style=flat-square)
 
+<p align="center">
+  <img src="screenshots/img1.png" alt="Lofi Radio UI" width="800">
+</p>
+
 ## ✨ Features
 
 - **Interactive Full-Screen TUI**: Built on [`go-tui`](https://github.com/grindlemire/go-tui) with clean category picker and now-playing screen.
@@ -15,7 +19,7 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 ## 📻 Supported Channels
 Planned channel roadmap:
 - [x] **Lofi Girl**
-- [ ] **Chillhop Music**
+- [x] **Chillhop Music**
 - [ ] **the bootleg boy**
 - [ ] **STEEZYASFUCK**
 - [ ] **The Jazz Hop Café**
