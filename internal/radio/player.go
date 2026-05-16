@@ -442,7 +442,7 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 		var out [NumBands]float64
 		samplesFound := n / bytesPerSample
 		rmsAccum := 0.0
-		for i := 0; i < samplesFound; i++ {
+		for i := range samplesFound {
 			base := i * bytesPerSample
 			sample := int16(binary.LittleEndian.Uint16(chunk[base:]))
 			audioSample := sample
@@ -479,7 +479,7 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 					frameMax := 0.0
 					frameMean := 0.0
 					lowNow := 0.0
-					for b := 0; b < NumBands; b++ {
+					for b := range NumBands {
 						lin := linVals[b]
 						if lin > binNorm[b] {
 							binNorm[b] += 0.045 * (lin - binNorm[b])
@@ -532,7 +532,7 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 							targetPeak = 0.94
 						}
 						scale := targetPeak / frameMax
-						for b := 0; b < NumBands; b++ {
+						for b := range NumBands {
 							v := frameVals[b]
 							contrastFloor := frameMean * 0.68
 							v = (v - contrastFloor) / (frameMax - contrastFloor + 1e-6)
@@ -622,7 +622,7 @@ func hannWindow(n int) []float64 {
 	if n <= 1 {
 		return w
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		w[i] = 0.5 - 0.5*math.Cos((2*math.Pi*float64(i))/float64(n-1))
 	}
 	return w
@@ -631,7 +631,7 @@ func hannWindow(n int) []float64 {
 func fftMagnitudes(samples []float64, window []float64) []float64 {
 	n := len(samples)
 	complexIn := make([]complex128, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		complexIn[i] = complex(samples[i]*window[i], 0)
 	}
 	fft(complexIn)
@@ -686,7 +686,7 @@ func buildBandRanges(fftSize, sampleRate, bands int, minHz, maxHz float64) []ban
 	if minHz < 1 {
 		minHz = 1
 	}
-	for b := 0; b < bands; b++ {
+	for b := range bands {
 		t0 := float64(b) / float64(bands)
 		t1 := float64(b+1) / float64(bands)
 		f0 := minHz * math.Pow(maxHz/minHz, t0)
