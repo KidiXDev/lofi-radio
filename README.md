@@ -9,12 +9,16 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 ## ✨ Features
 
 - **Interactive Full-Screen TUI**: Built on [`go-tui`](https://github.com/grindlemire/go-tui) with clean station picker and now-playing screen.
-- **Auto-Discovery**: Fetches currently available stations from the configured YouTube playlist.
+- **Auto-Discovery**: Fetches currently available stations from the selected channel playlist.
+- **Scalable Channel Config**: Channels are defined in a centralized config catalog and selected by id.
 - **Lightweight**: Minimal CPU and memory footprint compared to browser-based playback.
 
 ## 📻 Supported Channels
 
-Currently, **Lofi Radio** supports the following channels:
+Current built-in channel catalog:
+- `lofi-girl` (Lofi Girl)
+
+Planned channel roadmap:
 - [x] **Lofi Girl**
 - [ ] **Chillhop Music**
 - [ ] **the bootleg boy**
@@ -25,6 +29,13 @@ Currently, **Lofi Radio** supports the following channels:
 - [ ] **Dreamy**
 - [ ] **Lofi Geek**
 - [ ] **Chill with Taiki**
+
+How to use:
+- `lofi-radio -list-channels` to list available channel ids.
+- `lofi-radio -channel lofi-girl` to select a channel explicitly.
+- Set `LOFI_CHANNEL=lofi-girl` to define a default channel via environment variable.
+
+To add more channels, append entries in `internal/config/channels.go`.
 
 ## 🚀 Getting Started
 

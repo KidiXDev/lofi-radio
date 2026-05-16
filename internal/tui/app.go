@@ -45,6 +45,7 @@ type asyncResult struct {
 }
 
 type app struct {
+	channelName string
 	playlistURL string
 
 	mode       *gotui.State[viewMode]
@@ -84,8 +85,8 @@ type app struct {
 	fatal   bool
 }
 
-func Run(playlistURL string) error {
-	component := newApp(playlistURL)
+func Run(channelName, playlistURL string) error {
+	component := newApp(channelName, playlistURL)
 
 	ui, err := gotui.NewApp(
 		gotui.WithRootComponent(component),
@@ -103,8 +104,9 @@ func Run(playlistURL string) error {
 	return component.exitErr
 }
 
-func newApp(playlistURL string) *app {
+func newApp(channelName, playlistURL string) *app {
 	component := &app{
+		channelName: channelName,
 		playlistURL: playlistURL,
 
 		mode:       gotui.NewState(viewBoot),
@@ -594,7 +596,7 @@ func (a *app) startBootstrap() {
 
 		reporter.ReportProgress(bootstrap.ProgressEvent{
 			Type:    bootstrap.ProgressEventStatus,
-			Message: "Connecting to Server",
+			Message: fmt.Sprintf("Connecting to %s", a.channelName),
 		})
 
 		stations, err := radio.FetchStationsFromPlaylist(a.playlistURL)
