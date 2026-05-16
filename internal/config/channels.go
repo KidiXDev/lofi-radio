@@ -19,6 +19,11 @@ var channels = []Channel{
 		Name:        "Lofi Girl",
 		PlaylistURL: "https://youtube.com/playlist?list=PL6NdkXsPL07Il2hEQGcLI4dg_LTg7xA2L&si=nKgC5KsqxFZjtEv3",
 	},
+	{
+		ID:          "chillhop",
+		Name:        "Chillhop Music",
+		PlaylistURL: "https://youtube.com/playlist?list=PLt7bG0K25iXjjrfjMxkI6ClvebydMpT4b&si=ZzYGA0G96p4zDHmO",
+	},
 }
 
 func Channels() []Channel {

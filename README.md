@@ -8,8 +8,8 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 
 ## ✨ Features
 
-- **Interactive Full-Screen TUI**: Built on [`go-tui`](https://github.com/grindlemire/go-tui) with clean station picker and now-playing screen.
-- **Auto-Discovery**: Fetches currently available stations from the selected channel playlist.
+- **Interactive Full-Screen TUI**: Built on [`go-tui`](https://github.com/grindlemire/go-tui) with clean category picker and now-playing screen.
+- **Auto-Discovery**: Fetches currently available categories from the selected channel playlist.
 - **Scalable Channel Config**: Channels are defined in a centralized config catalog and selected by id.
 - **Lightweight**: Minimal CPU and memory footprint compared to browser-based playback.
 
@@ -90,7 +90,7 @@ Installer behavior:
 
 We are continuously working to make **Lofi Radio** the best terminal-based lofi player. Here is what we have planned:
 
-- [x] **TUI Station Picker**: Add a screen to switch between different lofi providers seamlessly.
+- [x] **TUI Category Picker**: Add a screen to switch between different lofi providers seamlessly.
 - [x] **Volume Control**: Native volume adjustment within the TUI.
 - [x] **Visualizers**: Add an ASCII-based audio visualizer for that extra retro feel.
 - [ ] **Favorites**: Bookmark specific tracks or streams.
@@ -101,3 +101,4 @@ and more to come !
 ## 📜 License
 
 Distributed under the [GNU General Public License v3.0](LICENSE).
+

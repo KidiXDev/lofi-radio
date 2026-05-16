@@ -1,6 +1,6 @@
 package radio
 
-type Station struct {
+type Category struct {
 	Title    string
 	VideoURL string
 }

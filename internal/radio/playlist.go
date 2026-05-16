@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func FetchStationsFromPlaylist(playlistURL string) ([]Station, error) {
+func FetchCategoriesFromPlaylist(playlistURL string) ([]Category, error) {
 	stdout, stderr, err := runYtDlp(
 		"--flat-playlist",
 		"--encoding", "utf-8",
@@ -18,7 +18,7 @@ func FetchStationsFromPlaylist(playlistURL string) ([]Station, error) {
 	}
 
 	lines := strings.Split(stdout, "\n")
-	stations := make([]Station, 0, len(lines))
+	categories := make([]Category, 0, len(lines))
 	seen := make(map[string]struct{}, len(lines))
 
 	for _, rawLine := range lines {
@@ -43,18 +43,18 @@ func FetchStationsFromPlaylist(playlistURL string) ([]Station, error) {
 			continue
 		}
 
-		stations = append(stations, Station{
+		categories = append(categories, Category{
 			Title:    title,
 			VideoURL: videoURL,
 		})
 		seen[videoURL] = struct{}{}
 	}
 
-	if len(stations) == 0 {
+	if len(categories) == 0 {
 		return nil, fmt.Errorf("playlist has no currently available videos")
 	}
 
-	return stations, nil
+	return categories, nil
 }
 
 func normalizeVideoURL(value string) string {
