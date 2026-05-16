@@ -36,7 +36,7 @@ var errBinDirFound = errors.New("bin-dir-found")
 
 type BinaryPaths struct {
 	YtDlp  string
-	FFplay string
+	FFmpeg string
 }
 
 func EnsureDependencies() (BinaryPaths, error) {
@@ -49,17 +49,17 @@ func EnsureDependenciesWithProgress(reporter ProgressReporter) (BinaryPaths, err
 		return BinaryPaths{}, err
 	}
 
-	ffplayPath, err := resolveFFplayPath(reporter)
+	ffmpegPath, err := resolveFFmpegPath(reporter)
 	if err != nil {
 		return BinaryPaths{}, err
 	}
 
-	config.SetBinaryPaths(ytDlpPath, ffplayPath)
+	config.SetBinaryPaths(ytDlpPath, ffmpegPath)
 	emitStatus(reporter, "dependencies", "Ready")
 
 	return BinaryPaths{
 		YtDlp:  ytDlpPath,
-		FFplay: ffplayPath,
+		FFmpeg: ffmpegPath,
 	}, nil
 }
 
@@ -89,38 +89,29 @@ func resolveYtDlpPath(reporter ProgressReporter) (string, error) {
 	return localPath, nil
 }
 
-func resolveFFplayPath(reporter ProgressReporter) (string, error) {
-	if hostFFplay := findExecutableInPath("ffplay"); hostFFplay != "" {
-		emitStatus(reporter, "ffplay", "Using system binary")
-		return hostFFplay, nil
+func resolveFFmpegPath(reporter ProgressReporter) (string, error) {
+	if hostFFmpeg := findExecutableInPath("ffmpeg"); hostFFmpeg != "" {
+		emitStatus(reporter, "ffmpeg", "Using system binary")
+		return hostFFmpeg, nil
 	}
 
-	hostFFmpeg := findExecutableInPath("ffmpeg")
-	if hostFFmpeg != "" {
-		hostFFplayFromFFmpeg := filepath.Join(filepath.Dir(hostFFmpeg), ffplayFileName())
-		if isRunnableFile(hostFFplayFromFFmpeg) {
-			emitStatus(reporter, "ffplay", "Using ffplay from system ffmpeg")
-			return hostFFplayFromFFmpeg, nil
-		}
+	localFFmpegPath := config.FFmpegPath()
+	if ensureRunnableFile(localFFmpegPath) {
+		emitStatus(reporter, "ffmpeg", "Using local cached binary")
+		return localFFmpegPath, nil
 	}
 
-	localFFplayPath := config.FFplayPath()
-	if ensureRunnableFile(localFFplayPath) {
-		emitStatus(reporter, "ffplay", "Using local cached binary")
-		return localFFplayPath, nil
+	emitStatus(reporter, "ffmpeg", "Downloading ffmpeg bundle")
+	if err := ensurePortableFFmpeg(filepath.Dir(localFFmpegPath), reporter); err != nil {
+		return "", fmt.Errorf("ensure ffmpeg binaries: %w", err)
 	}
 
-	emitStatus(reporter, "ffplay", "Downloading ffmpeg bundle")
-	if err := ensurePortableFFmpeg(filepath.Dir(localFFplayPath), reporter); err != nil {
-		return "", fmt.Errorf("ensure ffmpeg/ffplay binaries: %w", err)
+	if !isRunnableFile(localFFmpegPath) {
+		return "", fmt.Errorf("ffmpeg binary not found after download: %s", localFFmpegPath)
 	}
 
-	if !isRunnableFile(localFFplayPath) {
-		return "", fmt.Errorf("ffplay binary not found after download: %s", localFFplayPath)
-	}
-
-	emitStatus(reporter, "ffplay", "Binary downloaded")
-	return localFFplayPath, nil
+	emitStatus(reporter, "ffmpeg", "Binary downloaded")
+	return localFFmpegPath, nil
 }
 
 func ytDlpDownloadURL() (string, error) {
@@ -595,10 +586,10 @@ func emitDownload(reporter ProgressReporter, component string, progress Download
 	})
 }
 
-func ffplayFileName() string {
+func ffmpegFileName() string {
 	if runtime.GOOS == "windows" {
-		return "ffplay.exe"
+		return "ffmpeg.exe"
 	}
 
-	return "ffplay"
+	return "ffmpeg"
 }
