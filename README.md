@@ -14,10 +14,6 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 - **Lightweight**: Minimal CPU and memory footprint compared to browser-based playback.
 
 ## 📻 Supported Channels
-
-Current built-in channel catalog:
-- `lofi-girl` (Lofi Girl)
-
 Planned channel roadmap:
 - [x] **Lofi Girl**
 - [ ] **Chillhop Music**
@@ -29,13 +25,6 @@ Planned channel roadmap:
 - [ ] **Dreamy**
 - [ ] **Lofi Geek**
 - [ ] **Chill with Taiki**
-
-How to use:
-- `lofi-radio -list-channels` to list available channel ids.
-- `lofi-radio -channel lofi-girl` to select a channel explicitly.
-- Set `LOFI_CHANNEL=lofi-girl` to define a default channel via environment variable.
-
-To add more channels, append entries in `internal/config/channels.go`.
 
 ## 🚀 Getting Started
 
@@ -58,6 +47,8 @@ We are continuously working to make **Lofi Radio** the best terminal-based lofi 
 - [x] **Visualizers**: Add an ASCII-based audio visualizer for that extra retro feel.
 - [ ] **Favorites**: Bookmark specific tracks or streams.
 - [ ] **Sleep Timer**: Automatically stop playback after a set duration.
+
+and more to come !
 
 ## 📜 License
 
