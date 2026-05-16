@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/cmplx"
 	"net/url"
 	"os/exec"
 	"strconv"
@@ -28,61 +27,29 @@ const NumBands = 32
 const (
 	pcmSampleRate = 22050
 	pcmChannels   = 1
-	fftSize       = 512  // must be a power of 2
-	hopSize       = 128  // advance by hopSize samples per analysis frame (75% overlap)
+	pcmChunkBytes = 512
 )
-
-// bandBoundaries[b], bandBoundaries[b+1] are the inclusive FFT-bin range for band b.
-// Logarithmically spaced between ~20 Hz and Nyquist.
-var bandBoundaries [NumBands + 1]int
-
-func init() {
-	nyquist := pcmSampleRate / 2
-	minFreq := 20.0
-	maxFreq := float64(nyquist)
-	logMin := math.Log10(minFreq)
-	logMax := math.Log10(maxFreq)
-	for i := 0; i <= NumBands; i++ {
-		frac := float64(i) / float64(NumBands)
-		freq := math.Pow(10, logMin+frac*(logMax-logMin))
-		bin := int(freq * float64(fftSize) / float64(pcmSampleRate))
-		if bin > fftSize/2 {
-			bin = fftSize / 2
-		}
-		bandBoundaries[i] = bin
-	}
-}
-
-// precomputed Hann window.
-var hannWindow [fftSize]float64
-
-func init() {
-	for i := 0; i < fftSize; i++ {
-		hannWindow[i] = 0.5 * (1 - math.Cos(2*math.Pi*float64(i)/float64(fftSize-1)))
-	}
-}
 
 // VisualizerBands holds the current smoothed per-band amplitudes in [0, 1].
 type VisualizerBands struct {
-	mu     sync.RWMutex
-	bands  [NumBands]float64
+	bandsV atomic.Value
 	active int32 // atomic: 1 while PCM goroutine is running
 	// lastUpdateUnixNano stores when the latest band frame was published.
 	lastUpdateUnixNano int64
 }
 
 func (v *VisualizerBands) set(b [NumBands]float64) {
-	v.mu.Lock()
-	v.bands = b
-	v.mu.Unlock()
+	v.bandsV.Store(b)
 	atomic.StoreInt64(&v.lastUpdateUnixNano, time.Now().UnixNano())
 }
 
 // Get returns a snapshot of the current band amplitudes.
 func (v *VisualizerBands) Get() [NumBands]float64 {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return v.bands
+	raw := v.bandsV.Load()
+	if raw == nil {
+		return [NumBands]float64{}
+	}
+	return raw.([NumBands]float64)
 }
 
 // IsActive returns true while the PCM sampler goroutine is alive.
@@ -106,53 +73,15 @@ func (v *VisualizerBands) HasData() bool {
 }
 
 // ---------------------------------------------------------------------------
-// Cooley-Tukey in-place FFT (radix-2 DIT, iterative).
-// Works on a slice of complex128 whose length must be a power of 2.
-// ---------------------------------------------------------------------------
-func fftInPlace(x []complex128) {
-	n := len(x)
-
-	// Bit-reversal permutation.
-	j := 0
-	for i := 1; i < n; i++ {
-		bit := n >> 1
-		for ; j&bit != 0; bit >>= 1 {
-			j ^= bit
-		}
-		j ^= bit
-		if i < j {
-			x[i], x[j] = x[j], x[i]
-		}
-	}
-
-	// Butterfly stages.
-	for length := 2; length <= n; length <<= 1 {
-		angle := -2 * math.Pi / float64(length)
-		wBase := complex(math.Cos(angle), math.Sin(angle))
-		for i := 0; i < n; i += length {
-			w := complex(1, 0)
-			half := length >> 1
-			for k := 0; k < half; k++ {
-				u := x[i+k]
-				v := x[i+k+half] * w
-				x[i+k] = u + v
-				x[i+k+half] = u - v
-				w *= wBase
-			}
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Player
 // ---------------------------------------------------------------------------
 
 type Player struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	waitCh chan error
-	volume int
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	waitCh    chan error
+	volume    int
 	streamURL string
 
 	pcmCancel chan struct{}
@@ -162,7 +91,9 @@ type Player struct {
 }
 
 func NewPlayer(initialVolume int) *Player {
-	return &Player{volume: clampVolume(initialVolume)}
+	p := &Player{volume: clampVolume(initialVolume)}
+	p.Viz.set([NumBands]float64{})
+	return p
 }
 
 func (p *Player) Play(streamURL string) error {
@@ -303,9 +234,16 @@ func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec
 	args := []string{
 		"-loglevel", "error",
 		"-nostdin",
+		// Reduce demux/IO buffering so PCM reaches the analyzer continuously
+		// instead of in large live-segment bursts.
+		"-fflags", "+nobuffer",
+		"-flags", "low_delay",
+		"-flush_packets", "1",
+		"-max_delay", "0",
+		"-max_probe_packets", "1",
 		"-rw_timeout", "15000000",
-		"-probesize", "256k",
-		"-analyzeduration", "1M",
+		"-probesize", "32k",
+		"-analyzeduration", "0",
 	}
 	if withReconnect {
 		args = append(args,
@@ -344,29 +282,27 @@ func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec
 	return ffmpeg, stdout, nil
 }
 
-// runPCMAnalysis is the hot analysis loop.
-//
-// Reads PCM in hopSize-sample hops (75% overlap with fftSize window),
-// applies a Hann-windowed Cooley-Tukey FFT, maps bins to log-spaced bands,
-// and publishes raw (un-smoothed) normalised band values.
-//
-// Smoothing / decay is intentionally NOT done here — it must be done in the
-// consumer (TUI onTick) at a wall-clock rate, so that network bursts don't
-// cause exponential decay to collapse bars to zero between bursts.
-//
-// All buffers are pre-allocated; zero heap allocs in steady state.
+// runPCMAnalysis uses chunk-based amplitude/delta bins (reference logic style)
+// instead of FFT, which is more tolerant for unstable live HLS chunks.
 func (p *Player) runPCMAnalysis(r io.Reader, cancel chan struct{}) {
-	const bytesPerSample = 2
-	const hopBytes = hopSize * bytesPerSample
-
-	ring := make([]float64, fftSize)
-	ringPos := 0
-	rawBuf := make([]byte, hopBytes)
-	fftBuf := make([]complex128, fftSize)
-	var mag [fftSize / 2]float64
-	halfN := fftSize / 2
+	const (
+		bytesPerSample = 2
+		scaleDivisor   = 11000.0
+		bassBins       = 3
+		noiseGate      = 0.014
+		silenceFloor   = 220.0
+		silenceFramesN = 8
+	)
+	rawBuf := make([]byte, pcmChunkBytes)
+	frameSamples := pcmChunkBytes / bytesPerSample
+	frameDur := time.Second * time.Duration(frameSamples) / time.Duration(pcmSampleRate)
+	binState := make([]float64, NumBands)
+	prevSamples := make([]int16, NumBands)
+	binPeak := make([]float64, NumBands)
+	silenceFrames := 0
 	frames := 0
 	lastLog := time.Now()
+	var nextFrameAt time.Time
 
 	for {
 		select {
@@ -375,66 +311,101 @@ func (p *Player) runPCMAnalysis(r io.Reader, cancel chan struct{}) {
 		default:
 		}
 
-		if _, err := io.ReadFull(r, rawBuf); err != nil {
+		n, err := io.ReadFull(r, rawBuf)
+		if err != nil {
 			writeLog("viz.analysis.read_error err=%v", err)
 			return
 		}
-
-		// Decode PCM into ring buffer.
-		for i := 0; i < hopSize; i++ {
-			s := int16(binary.LittleEndian.Uint16(rawBuf[i*2:]))
-			ring[ringPos] = float64(s) / 32768.0
-			ringPos = (ringPos + 1) % fftSize
+		for i := range binPeak {
+			binPeak[i] = 0
 		}
-
-		// Build Hann-windowed FFT input from ring buffer.
-		for i := 0; i < fftSize; i++ {
-			idx := (ringPos + i) % fftSize
-			fftBuf[i] = complex(ring[idx]*hannWindow[i], 0)
-		}
-
-		// In-place FFT.
-		fftInPlace(fftBuf)
-
-		// Magnitude spectrum.
-		norm := 1.0 / float64(fftSize)
-		for k := 0; k < halfN; k++ {
-			mag[k] = cmplx.Abs(fftBuf[k]) * norm
-		}
-
-		// Map bins → log-spaced bands (RMS per band).
-		const softCeil = 0.12
 		var out [NumBands]float64
-		for b := 0; b < NumBands; b++ {
-			lo := bandBoundaries[b]
-			hi := bandBoundaries[b+1]
-			if hi <= lo {
-				hi = lo + 1
-			}
-			if hi > halfN {
-				hi = halfN
-			}
-			var sumSq float64
-			for k := lo; k < hi; k++ {
-				sumSq += mag[k] * mag[k]
-			}
-			count := hi - lo
-			if count > 0 {
-				v := math.Sqrt(sumSq/float64(count)) / softCeil
-				if v > 1 {
-					v = 1
+		frameAbsSum := 0.0
+		samplesFound := n / bytesPerSample
+		for i := 0; i < samplesFound; i++ {
+			base := i * 2
+			sample := int16(binary.LittleEndian.Uint16(rawBuf[base:]))
+			absSample := math.Abs(float64(sample))
+			frameAbsSum += absSample
+			for b := 0; b < NumBands; b++ {
+				var value float64
+				if b < bassBins {
+					// Keep only a few true bass bins driven by amplitude.
+					value = absSample
+				} else {
+					delta := math.Abs(float64(sample - prevSamples[b]))
+					// Treble-ish bins react mostly to transients.
+					value = delta * (0.8 + 1.8*float64(b)/float64(NumBands))
 				}
-				out[b] = math.Pow(v, 0.60)
+				prevSamples[b] = sample
+
+				if value > binPeak[b] {
+					binPeak[b] = value
+				}
 			}
 		}
+		avgAbs := 0.0
+		if samplesFound > 0 {
+			avgAbs = frameAbsSum / float64(samplesFound)
+		}
+		if avgAbs < silenceFloor {
+			silenceFrames++
+		} else {
+			silenceFrames = 0
+		}
 
-		// Publish raw values — NO smoothing/decay here.
+		for b := 0; b < NumBands; b++ {
+			pos := float64(b) / float64(NumBands-1)
+			decay := 0.84 - 0.10*pos
+			if decay < 0.70 {
+				decay = 0.70
+			}
+			attack := 0.80
+			if silenceFrames >= silenceFramesN {
+				// Harder decay in sustained silence/track transition to clear stale bars.
+				binState[b] *= 0.45
+			} else if binPeak[b] > binState[b] {
+				binState[b] += attack * (binPeak[b] - binState[b])
+			} else {
+				binState[b] *= decay
+			}
+
+			v := binState[b] / scaleDivisor
+			if v > 1 {
+				v = 1
+			}
+			if v < noiseGate {
+				v = 0
+			}
+			out[b] = v
+		}
+
 		p.Viz.set(out)
 		frames++
 		if time.Since(lastLog) >= 5*time.Second {
 			writeLog("viz.analysis.heartbeat frames=%d", frames)
 			frames = 0
 			lastLog = time.Now()
+		}
+
+		// Pace analysis to audio-time so bursty live-segment delivery (e.g. ~5s HLS)
+		// still renders as continuous motion in the TUI.
+		now := time.Now()
+		if nextFrameAt.IsZero() || now.Sub(nextFrameAt) > 250*time.Millisecond {
+			nextFrameAt = now
+		}
+		nextFrameAt = nextFrameAt.Add(frameDur)
+		sleepFor := time.Until(nextFrameAt)
+		if sleepFor > 0 {
+			timer := time.NewTimer(sleepFor)
+			select {
+			case <-cancel:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
 		}
 	}
 }

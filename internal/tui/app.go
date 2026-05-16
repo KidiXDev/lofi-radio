@@ -70,7 +70,6 @@ type app struct {
 	pulsePhase   *gotui.State[float64]
 	aniTick      int
 	vizLiveHold  int
-	vizRecoverAt time.Time
 
 	// vizBands holds the smoothed per-band amplitudes updated by onTick.
 	// Plain array (not State) — only accessed from the UI goroutine.
@@ -338,22 +337,29 @@ func (a *app) onTick() {
 	// Sample the latest raw bands from the analysis goroutine.
 	raw := a.player.Viz.Get()
 	paused := a.paused.Get()
+	fresh := a.player.Viz.IsFresh(180 * time.Millisecond)
 
 	const (
-		attack     = 0.80 // how fast bars rise  (per 33ms tick)
-		decayPlay  = 0.88 // how fast bars fall while playing
-		decayPause = 0.92 // slower decay when paused (visual idle)
+		attackFresh = 0.36 // smooth rise to reduce frame-to-frame jitter
+		attackStale = 0.12 // avoid sudden jumps when feed resumes after stalls
+		decayFresh  = 0.93 // gentle release while stream is healthy
+		decayStale  = 0.985 // very slow fall during short analyzer stalls
+		decayPause  = 0.94 // slow decay when paused (visual idle)
 	)
-
-	decay := decayPlay
-	if paused {
-		decay = decayPause
-	}
 
 	for b := 0; b < radio.NumBands; b++ {
 		target := raw[b]
 		if paused {
 			target = 0 // decay to flat when paused
+		}
+		attack := attackFresh
+		decay := decayFresh
+		if paused {
+			attack = attackStale
+			decay = decayPause
+		} else if !fresh {
+			attack = attackStale
+			decay = decayStale
 		}
 		if target > a.vizBands[b] {
 			a.vizBands[b] += attack * (target - a.vizBands[b])
