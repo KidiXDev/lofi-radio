@@ -34,10 +34,11 @@ const NumBands = 32
 
 // PCM capture parameters.
 const (
-	pcmSampleRate = 44100
-	pcmChannels   = 2
-	pcmChunkBytes = 4096
-	fftSize       = 1024
+	pcmSampleRate    = 48000 // Hz
+	pcmChannels      = 2     // stereo
+	pcmBitDepthBytes = 2     // 16-bit
+	pcmChunkBytes    = 4096
+	fftSize          = 1024
 )
 
 // VisualizerBands holds the current smoothed per-band amplitudes in [0, 1].
@@ -126,6 +127,11 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	if err := p.Stop(); err != nil {
 		return err
 	}
+	if pcmBitDepthBytes != 1 && pcmBitDepthBytes != 2 {
+		err := fmt.Errorf("unsupported bit depth for oto v1: %d (expected 1 or 2)", pcmBitDepthBytes)
+		writeLog("playback.config_error err=%v", err)
+		return err
+	}
 
 	if u, err := url.Parse(streamURL); err == nil {
 		writeLog("playback.connecting host=%q volume=%d", u.Host, volume)
@@ -133,7 +139,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 		writeLog("playback.connecting volume=%d", volume)
 	}
 
-	ctx, err := oto.NewContext(pcmSampleRate, pcmChannels, 2, pcmChunkBytes*4)
+	ctx, err := oto.NewContext(pcmSampleRate, pcmChannels, pcmBitDepthBytes, pcmChunkBytes*4)
 	if err != nil {
 		return fmt.Errorf("create audio context: %w", err)
 	}
@@ -156,6 +162,12 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	atomic.StoreInt32(&p.pauseFlag, 0)
 
 	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				writeLog("playback.panic recovered=%v", recovered)
+				waitCh <- fmt.Errorf("playback panic: %v", recovered)
+			}
+		}()
 		atomic.StoreInt32(&p.Viz.active, 1)
 		defer atomic.StoreInt32(&p.Viz.active, 0)
 		defer audioOnce.Do(func() { _ = audioPlayer.Close() })
@@ -298,8 +310,13 @@ func readFirstPCMChunk(stdout io.ReadCloser, ffmpeg *exec.Cmd, timeout time.Dura
 	}
 	ch := make(chan probeResult, 1)
 	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				ch <- probeResult{err: fmt.Errorf("probe panic: %v", recovered)}
+			}
+		}()
 		buf := make([]byte, pcmChunkBytes)
-		n, err := io.ReadAtLeast(stdout, buf, 2)
+		n, err := io.ReadAtLeast(stdout, buf, pcmBitDepthBytes)
 		if n > 0 {
 			out := make([]byte, n)
 			copy(out, buf[:n])
@@ -321,7 +338,7 @@ func readFirstPCMChunk(stdout io.ReadCloser, ffmpeg *exec.Cmd, timeout time.Dura
 			_ = ffmpeg.Wait()
 			return nil, res.err
 		}
-		if len(res.data) < 2 {
+		if len(res.data) < pcmBitDepthBytes {
 			if ffmpeg.Process != nil {
 				_ = ffmpeg.Process.Kill()
 			}
@@ -382,7 +399,7 @@ func startPCMFFmpeg(streamURL string, withReconnect bool) (*exec.Cmd, io.ReadClo
 
 func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 	const (
-		bytesPerSample = 2
+		bytesPerSample = pcmBitDepthBytes
 		noiseGate      = 0.012
 		minFreqHz      = 40.0
 		maxFreqHz      = 9000.0
@@ -402,7 +419,7 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 	}
 
 	for {
-		n, err := io.ReadAtLeast(r, rawBuf, 2)
+		n, err := io.ReadAtLeast(r, rawBuf, bytesPerSample)
 		if err != nil {
 			if (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) && n >= 2 {
 				// Just ignore for now
@@ -410,11 +427,11 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 				return err
 			}
 		}
-		if n%2 == 1 {
-			n--
-			if n == 0 {
-				continue
-			}
+		if rem := n % bytesPerSample; rem != 0 {
+			n -= rem
+		}
+		if n == 0 {
+			continue
 		}
 		chunk := rawBuf[:n]
 		volScale := float64(clampVolume(p.Volume())) / 100.0
@@ -426,7 +443,7 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 		samplesFound := n / bytesPerSample
 		rmsAccum := 0.0
 		for i := 0; i < samplesFound; i++ {
-			base := i * 2
+			base := i * bytesPerSample
 			sample := int16(binary.LittleEndian.Uint16(chunk[base:]))
 			audioSample := sample
 			if isPaused {

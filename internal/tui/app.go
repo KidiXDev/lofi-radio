@@ -267,6 +267,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 		}
 
 		if result.err != nil {
+			radio.Logf("ui.resolve.error err=%v", result.err)
 			a.setTransientError(fmt.Sprintf("stream resolution failed: %v", result.err))
 			return
 		}
@@ -274,6 +275,17 @@ func (a *app) onAsyncResult(result asyncResult) {
 		// Start playback off the UI loop; ffmpeg probe can block for seconds.
 		a.status.Set("Starting audio stream")
 		go func(resolveToken int, st radio.Station, streamURL string) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					radio.Logf("ui.play.panic station=%q recovered=%v", st.Title, recovered)
+					a.emitResult(asyncResult{
+						kind:         asyncPlay,
+						station:      st,
+						resolveToken: resolveToken,
+						err:          fmt.Errorf("play panic: %v", recovered),
+					})
+				}
+			}()
 			err := a.player.Play(streamURL)
 			a.emitResult(asyncResult{
 				kind:         asyncPlay,
@@ -288,6 +300,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 			return
 		}
 		if result.err != nil {
+			radio.Logf("ui.play.error station=%q err=%v", result.station.Title, result.err)
 			a.setTransientError(fmt.Sprintf("playback failed: %v", result.err))
 			return
 		}
@@ -560,6 +573,12 @@ func (a *app) setFatalError(err error, message string) {
 
 func (a *app) startBootstrap() {
 	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				radio.Logf("ui.bootstrap.panic recovered=%v", recovered)
+				a.emitResult(asyncResult{kind: asyncBootstrap, err: fmt.Errorf("bootstrap panic: %v", recovered)})
+			}
+		}()
 		reporter := bootstrap.ProgressReporterFunc(func(event bootstrap.ProgressEvent) {
 			select {
 			case a.bootCh <- event:
@@ -568,6 +587,7 @@ func (a *app) startBootstrap() {
 		})
 
 		if _, err := bootstrap.EnsureDependenciesWithProgress(reporter); err != nil {
+			radio.Logf("ui.bootstrap.error stage=dependencies err=%v", err)
 			a.emitResult(asyncResult{kind: asyncBootstrap, err: err})
 			return
 		}
@@ -578,6 +598,9 @@ func (a *app) startBootstrap() {
 		})
 
 		stations, err := radio.FetchStationsFromPlaylist(a.playlistURL)
+		if err != nil {
+			radio.Logf("ui.bootstrap.error stage=playlist err=%v", err)
+		}
 		a.emitResult(asyncResult{
 			kind:     asyncBootstrap,
 			stations: stations,
@@ -595,7 +618,21 @@ func (a *app) startResolve(station radio.Station) {
 	a.errMessage.Set("")
 
 	go func(resolveToken int, st radio.Station) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				radio.Logf("ui.resolve.panic station=%q recovered=%v", st.Title, recovered)
+				a.emitResult(asyncResult{
+					kind:         asyncResolve,
+					station:      st,
+					resolveToken: resolveToken,
+					err:          fmt.Errorf("resolve panic: %v", recovered),
+				})
+			}
+		}()
 		streamURL, err := radio.GetDirectAudioURL(st.VideoURL)
+		if err != nil {
+			radio.Logf("ui.resolve.error station=%q err=%v", st.Title, err)
+		}
 		a.emitResult(asyncResult{
 			kind:         asyncResolve,
 			station:      st,
