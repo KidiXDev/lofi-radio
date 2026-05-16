@@ -3,11 +3,13 @@ package radio
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 )
 
 var logMu sync.Mutex
+var crashLogFile *os.File
 
 func writeLog(format string, args ...any) {
 	logMu.Lock()
@@ -24,3 +26,27 @@ func writeLog(format string, args ...any) {
 	_, _ = fmt.Fprintf(f, "%s %s\n", ts, line)
 }
 
+func Logf(format string, args ...any) {
+	writeLog(format, args...)
+}
+
+func InitCrashLogging() {
+	logMu.Lock()
+	defer logMu.Unlock()
+
+	if crashLogFile != nil {
+		return
+	}
+
+	f, err := os.OpenFile("logger.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+
+	if err := debug.SetCrashOutput(f, debug.CrashOptions{}); err != nil {
+		_ = f.Close()
+		return
+	}
+
+	crashLogFile = f
+}
