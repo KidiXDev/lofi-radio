@@ -33,3 +33,8 @@ go.work.sum
 
 bin/
 dist/
+
+AGENTS.md
+CLAUDE.md
+
+.codex/
