@@ -1373,27 +1373,6 @@ func renderASCIIBlock(lines []string) *gotui.Element {
 	return box
 }
 
-// bareBox is a borderless flex column that fills available space.
-func bareBox() *gotui.Element {
-	return gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-		gotui.WithPaddingTRBL(1, 0, 0, 0),
-		gotui.WithGap(1),
-	)
-}
-
-func contentBox() *gotui.Element {
-	return gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-		gotui.WithPadding(1),
-		gotui.WithGap(1),
-	)
-}
-
 // renderFancyBar renders a Unicode block progress bar.
 func renderFancyBar(current, total int64, width int) string {
 	if width < 4 {
@@ -1599,20 +1578,6 @@ func clamp64(value, minValue, maxValue int64) int64 {
 		return maxValue
 	}
 	return value
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 var (
