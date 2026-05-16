@@ -38,6 +38,53 @@ Planned channel roadmap:
 - [FFmpeg/FFplay](https://ffmpeg.org/): For high-performance audio playback.
 - [go-tui](https://github.com/grindlemire/go-tui): For the terminal UI framework.
 
+## 📦 Installation
+
+### Download from Releases
+
+1. Open the [Releases page](https://github.com/KidiXDev/lofi-radio/releases/latest).
+2. Download the asset for your platform:
+   - `lofi-radio_Windows_x86_64.zip` or `lofi-radio_Windows_arm64.zip`
+   - `lofi-radio_Linux_x86_64.tar.gz` or `lofi-radio_Linux_arm64.tar.gz`
+3. Extract the binary:
+   - Windows: `lofi.exe`
+   - Linux: `lofi`
+4. Put it in a directory available in your `PATH`.
+
+### One-line installer
+
+- Windows (PowerShell):
+  ```powershell
+  irm https://raw.githubusercontent.com/KidiXDev/lofi-radio/main/scripts/install.ps1 | iex
+  ```
+- Linux:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/KidiXDev/lofi-radio/main/scripts/install.sh | bash
+  ```
+
+Installer behavior:
+- Downloads the latest release for your OS/architecture.
+- Installs into a user-safe directory:
+  - Windows: `%LOCALAPPDATA%\lofi-radio\bin`
+  - Linux: `~/.local/bin`
+- Adds the install directory to `PATH` for future shells.
+- Then you can run: `lofi`
+
+## 🔄 Updates
+
+- Check for updates:
+  ```bash
+  lofi -check-update
+  ```
+- Install latest update from GitHub Releases:
+  ```bash
+  lofi -update
+  ```
+- Optional custom install location during update:
+  ```bash
+  lofi -update -update-install-dir "/custom/path"
+  ```
+
 ## 🗺️ Roadmap
 
 We are continuously working to make **Lofi Radio** the best terminal-based lofi player. Here is what we have planned:
