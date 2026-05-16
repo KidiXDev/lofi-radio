@@ -511,38 +511,43 @@ func (a *app) emitResult(result asyncResult) {
 func (a *app) Render(ui *gotui.App) *gotui.Element {
 	_ = ui
 
-	// Pulsing border: cyan ↔ magenta
+	// Warm sunset pulsing color
 	pulse := a.pulsePhase.Get()
 	t := (math.Sin(pulse) + 1) / 2
-	borderColor := gotui.NewGradient(gotui.Cyan, gotui.Magenta).At(t)
+	borderColor := gotui.NewGradient(gotui.Yellow, gotui.Red).At(t)
 
 	root := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithHeightPercent(100),
-		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(borderColor)),
-		gotui.WithPaddingTRBL(0, 1, 0, 1),
-		gotui.WithGap(0),
+		gotui.WithGap(1),
+		gotui.WithPaddingTRBL(1, 2, 1, 2),
 	)
 
 	// ── Header ──────────────────────────────────────────────
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 	header := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(1),
-		gotui.WithPaddingTRBL(1, 0, 0, 0),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(borderColor)),
+		gotui.WithPaddingTRBL(0, 2, 0, 2),
+		gotui.WithGap(2),
 	)
+	
 	header.AddChild(gotui.New(
-		gotui.WithText("♫ LOFI RADIO"),
-		gotui.WithTextGradient(gotui.NewGradient(gotui.Cyan, gotui.Magenta).WithDirection(gotui.GradientHorizontal)),
+		gotui.WithText("⚡ RADIO LOFI"),
+		gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.Magenta).WithDirection(gotui.GradientHorizontal)),
 		gotui.WithTextStyle(gotui.NewStyle().Bold()),
 	))
 	header.AddChild(gotui.New(
 		gotui.WithText(spin),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 	))
+	header.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf(" |  %s", a.modeLabel())),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+	))
+
 	root.AddChild(header)
-	root.AddChild(gotui.New(gotui.WithHR()))
 
 	// ── Content ─────────────────────────────────────────────
 	content := gotui.New(
@@ -564,12 +569,17 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 	root.AddChild(content)
 
 	// ── Footer ──────────────────────────────────────────────
-	root.AddChild(gotui.New(gotui.WithHR()))
-	root.AddChild(gotui.New(
+	footer := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		gotui.WithPaddingTRBL(0, 2, 0, 2),
+	)
+	footer.AddChild(gotui.New(
 		gotui.WithText(a.footerHint.Get()),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-		gotui.WithPaddingTRBL(0, 0, 1, 0),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.White).Dim()),
 	))
+	root.AddChild(footer)
 
 	return root
 }
@@ -677,83 +687,116 @@ func (a *app) renderResolving() *gotui.Element {
 }
 
 func (a *app) renderPlayer() *gotui.Element {
-	box := bareBox()
+	// A flex row with two columns
+	row := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithFlexGrow(1),
+		gotui.WithGap(2),
+	)
+
+	// LEFT COLUMN (Station Info & Playback)
+	leftCol := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		gotui.WithPadding(2),
+		gotui.WithGap(1),
+	)
+	
 	station := a.currentStation.Get()
 	isPaused := a.paused.Get()
-	phase := a.pulsePhase.Get()
 
-	// ── Station title (gradient, bold, truncated) ──────────
-	titleColor := gotui.NewGradient(gotui.Cyan, gotui.Magenta).At(
-		(math.Sin(phase)*0.5 + 0.5),
-	)
-	box.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("  %s", compactText(station.Title, 58))),
-		gotui.WithTextGradient(gotui.NewGradient(gotui.Cyan, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
+	// Title
+	leftCol.AddChild(gotui.New(
+		gotui.WithText(compactText(station.Title, 58)),
+		gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
 		gotui.WithTextStyle(gotui.NewStyle().Bold()),
 	))
-	_ = titleColor
+	leftCol.AddChild(gotui.New(gotui.WithHR()))
 
-	// ── Status + elapsed on one line ───────────────────────
-	statusText := "▶ playing"
+	// Status
+	statusText := "▶ PLAYING"
 	statusStyle := gotui.NewStyle().Foreground(gotui.BrightGreen)
 	if isPaused {
-		statusText = "⏸ paused"
+		statusText = "⏸ PAUSED "
 		statusStyle = gotui.NewStyle().Foreground(gotui.BrightYellow)
 	}
+	
 	infoRow := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithGap(3),
 	)
 	infoRow.AddChild(gotui.New(
-		gotui.WithText("  "+statusText),
+		gotui.WithText(statusText),
 		gotui.WithTextStyle(statusStyle.Bold()),
 	))
 	infoRow.AddChild(gotui.New(
-		gotui.WithText(a.playbackElapsed()),
+		gotui.WithText("TIME: " + a.playbackElapsed()),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite)),
+	))
+	leftCol.AddChild(infoRow)
+
+	// Volume
+	vol := a.volume.Get()
+	leftCol.AddChild(gotui.New(gotui.WithHR()))
+	leftCol.AddChild(gotui.New(
+		gotui.WithText("VOLUME"),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 	))
-	box.AddChild(infoRow)
-
-	box.AddChild(gotui.New(gotui.WithHR()))
-
-	// ── Wave visualizer ─────────────────────────────────────
-	box.AddChild(a.buildWaveVisualizer(isPaused))
-
-	box.AddChild(gotui.New(gotui.WithHR()))
-
-	// ── Volume bar ──────────────────────────────────────────
-	vol := a.volume.Get()
 	volRow := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithGap(1),
 	)
 	volRow.AddChild(gotui.New(
-		gotui.WithText("  vol"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-	volRow.AddChild(gotui.New(
-		gotui.WithText(renderFancyBar(int64(vol), 100, 24)),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Cyan)),
+		gotui.WithText(renderFancyBar(int64(vol), 100, 20)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
 	))
 	volRow.AddChild(gotui.New(
 		gotui.WithText(fmt.Sprintf("%d%%", vol)),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite)),
 	))
-	box.AddChild(volRow)
+	leftCol.AddChild(volRow)
 
-	return box
+	// RIGHT COLUMN (Visualizer)
+	rightCol := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		gotui.WithPadding(2),
+	)
+	
+	rightCol.AddChild(gotui.New(
+		gotui.WithText("VISUALIZER"),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+	))
+	rightCol.AddChild(gotui.New(gotui.WithHR()))
+	
+	visualizerBox := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithPaddingTRBL(2, 0, 0, 0),
+	)
+	visualizerBox.AddChild(a.buildWaveVisualizer(isPaused))
+	
+	rightCol.AddChild(visualizerBox)
+
+	row.AddChild(leftCol)
+	row.AddChild(rightCol)
+
+	return row
 }
 
 // buildWaveVisualizer renders an animated ASCII frequency-bar visualizer.
 // Bar count adapts: use a reasonable default (20) that fits narrow terminals.
 func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 	phase := a.wavePhase.Get()
-	numBars := 20
-	barChars := []string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+	numBars := 30
+	barChars := []string{" ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 
 	row := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(1),
+		gotui.WithGap(0),
 	)
 
 	for i := 0; i < numBars; i++ {
@@ -773,8 +816,8 @@ func (a *app) buildWaveVisualizer(paused bool) *gotui.Element {
 			}
 		}
 		barIdx := clamp(int(height*float64(len(barChars)-1)), 0, len(barChars)-1)
-		hue := math.Mod(float64(i)*18+phase*25, 360)
-		r, g, b := hslToRGB(hue, 0.85, 0.55)
+		hue := math.Mod(float64(i)*12+phase*30, 360)
+		r, g, b := hslToRGB(hue, 0.9, 0.6)
 		row.AddChild(gotui.New(
 			gotui.WithText(barChars[barIdx]),
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(r, g, b))),
