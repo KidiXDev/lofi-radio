@@ -32,14 +32,14 @@ if [ -z "$download_url" ]; then
   exit 1
 fi
 
-install_dir="${HOME}/.local/bin"
+install_dir="${HOME}/.local/bin/lofi-radio"
 mkdir -p "$install_dir"
 
 tmp_archive="$(mktemp)"
 trap 'rm -f "$tmp_archive"' EXIT
 curl -fL "$download_url" -o "$tmp_archive"
 
-tar -xzf "$tmp_archive" -C "$install_dir" lofi
+tar -xzf "$tmp_archive" -C "$install_dir"
 chmod +x "$install_dir/lofi"
 
 case ":${PATH}:" in

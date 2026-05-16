@@ -67,7 +67,7 @@ Installer behavior:
 - Downloads the latest release for your OS/architecture.
 - Installs into a user-safe directory:
   - Windows: `%LOCALAPPDATA%\lofi-radio\bin`
-  - Linux: `~/.local/bin`
+  - Linux: `~/.local/bin/lofi-radio`
 - Adds the install directory to `PATH` for future shells.
 - Then you can run: `lofi`
 
