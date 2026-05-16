@@ -421,7 +421,17 @@ func (a *app) handleEnter(ke gotui.KeyEvent) {
 
 		selected := clamp(a.selected.Get(), 0, len(stations)-1)
 		a.selected.Set(selected)
-		a.startResolve(stations[selected])
+		station := stations[selected]
+
+		// Smart Navigation: if already playing this station, just go back to player.
+		if a.playing.Get() && a.currentStation.Get().VideoURL == station.VideoURL {
+			a.mode.Set(viewPlayer)
+			a.status.Set("Playing")
+			a.footerHint.Set(playerHint)
+			return
+		}
+
+		a.startResolve(station)
 
 	case viewError:
 		a.handleQuitOrBack(ke)
@@ -544,6 +554,11 @@ func (a *app) startBootstrap() {
 			a.emitResult(asyncResult{kind: asyncBootstrap, err: err})
 			return
 		}
+
+		reporter.ReportProgress(bootstrap.ProgressEvent{
+			Type:    bootstrap.ProgressEventStatus,
+			Message: "Connecting to Server",
+		})
 
 		stations, err := radio.FetchStationsFromPlaylist(a.playlistURL)
 		a.emitResult(asyncResult{
@@ -695,15 +710,15 @@ func (a *app) renderHeader(borderColor gotui.Color) *gotui.Element {
 	}
 
 	left.AddChild(gotui.New(
-		gotui.WithText("RADIO"),
-		gotui.WithWrap(false),
-		gotui.WithTextStyle(radioStyle),
-	))
-	left.AddChild(gotui.New(
 		gotui.WithText("LOFI"),
 		gotui.WithWrap(false),
 		gotui.WithTextGradient(gotui.NewGradient(gotui.White, gotui.BrightMagenta).WithDirection(gotui.GradientHorizontal)),
 		gotui.WithTextStyle(gotui.NewStyle().Bold()),
+	))
+	left.AddChild(gotui.New(
+		gotui.WithText("RADIO"),
+		gotui.WithWrap(false),
+		gotui.WithTextStyle(radioStyle),
 	))
 	left.AddChild(gotui.New(
 		gotui.WithText("|"),
@@ -760,16 +775,13 @@ func (a *app) renderBoot() *gotui.Element {
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 
 	box.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("%s  %s", spin, a.status.Get())),
+		gotui.WithText(fmt.Sprintf("%s  %s", spin, sanitizeBootstrapMessage(a.status.Get()))),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan)),
 	))
 
 	event := a.bootEvent.Get()
 	if event.Type == bootstrap.ProgressEventDownload {
-		label := strings.ToUpper(strings.TrimSpace(event.Component))
-		if label == "" {
-			label = "DOWNLOAD"
-		}
+		label := "DOWNLOADING"
 		totalLabel := "unknown"
 		if event.Download.TotalBytes > 0 {
 			totalLabel = humanBytes(event.Download.TotalBytes)
@@ -890,33 +902,61 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 		end := min(start+maxRows, len(stations))
 
 		for i := start; i < end; i++ {
-			if i == selected {
-				r := gotui.New(
-					gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-					gotui.WithGap(1),
-				)
-				spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
+			station := stations[i]
+			isCurrent := a.playing.Get() && a.currentStation.Get().VideoURL == station.VideoURL
+			isSelected := i == selected
+
+			r := gotui.New(
+				gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+				gotui.WithGap(1),
+				gotui.WithAlign(gotui.AlignCenter),
+			)
+
+			if isSelected {
+				// Selection indicator: Pulsing arrow
+				pulse := a.pulsePhase.Get()
+				arrow := "▶"
+				if math.Sin(pulse*2.5) > 0 {
+					arrow = "▷"
+				}
 				r.AddChild(gotui.New(
-					gotui.WithText(spin),
+					gotui.WithText(arrow),
 					gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Red).Bold()),
 				))
+
+				titleStyle := gotui.NewStyle().Bold()
+				if isCurrent {
+					titleStyle = titleStyle.Foreground(gotui.BrightGreen)
+				}
+
 				r.AddChild(gotui.New(
-					gotui.WithText(compactText(stations[i].Title, 56)),
+					gotui.WithText(compactText(station.Title, 48)),
 					gotui.WithWrap(false),
 					gotui.WithTruncate(true),
 					gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
-					gotui.WithTextStyle(gotui.NewStyle().Bold()),
+					gotui.WithTextStyle(titleStyle),
 				))
-				right.AddChild(r)
 			} else {
 				dim := gotui.NewStyle().Foreground(gotui.BrightBlack)
-				right.AddChild(gotui.New(
-					gotui.WithText(fmt.Sprintf("  %s", compactText(stations[i].Title, 58))),
+				if isCurrent {
+					dim = dim.Foreground(gotui.Green).Dim()
+				}
+				r.AddChild(gotui.New(
+					gotui.WithText(fmt.Sprintf("  %s", compactText(station.Title, 50))),
 					gotui.WithWrap(false),
 					gotui.WithTruncate(true),
 					gotui.WithTextStyle(dim),
 				))
 			}
+
+			if isCurrent {
+				r.AddChild(gotui.New(
+					gotui.WithText(" [PLAYING]"),
+					gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightGreen).Bold().Dim()),
+				))
+			}
+
+			right.AddChild(r)
 		}
 
 		if len(stations) > maxRows {
@@ -945,11 +985,11 @@ func (a *app) renderResolving() *gotui.Element {
 
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 	box.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("%s  Resolving stream...", spin)),
+		gotui.WithText(fmt.Sprintf("%s  Connecting to server...", spin)),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
 	))
 	box.AddChild(gotui.New(
-		gotui.WithText("  This may take a moment. Connecting to server..."),
+		gotui.WithText("  This may take a moment."),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 	))
 	box.AddChild(gotui.New(gotui.WithHR()))
@@ -1161,7 +1201,7 @@ func (a *app) buildWaveVisualizer(paused bool, termWidth, rows int) *gotui.Eleme
 			// Smooth sunset gradient: Cyan -> Blue -> Purple -> Red
 			barFrac := float64(i) / float64(numBars)
 			rowFrac := float64(rows-1-row) / float64(rows)
-			
+
 			// Color calculation for a more dynamic look
 			hue := 180 + barFrac*120 + rowFrac*60
 			hue = math.Mod(hue+phase*8, 360)
@@ -1173,7 +1213,7 @@ func (a *app) buildWaveVisualizer(paused bool, termWidth, rows int) *gotui.Eleme
 			if ch == " " {
 				lit = 0.06 // dim background
 				sat = 0.1
-				ch = "·" 
+				ch = "·"
 			}
 			r, g, b := hslToRGB(hue, sat, lit)
 
@@ -1219,7 +1259,7 @@ func (a *app) buildVisualizerDecor(paused bool, termWidth int) *gotui.Element {
 			x := float64(c) / float64(max(cols-1, 1))
 			// More complex wave for the background
 			w := 0.5 + 0.4*math.Sin(phase*1.4+x*9.0-rowFrac*2.3) + 0.1*math.Sin(phase*3.1-x*4.5)
-			
+
 			ch := "·"
 			if w > 0.85 {
 				ch = "•"
@@ -1227,12 +1267,12 @@ func (a *app) buildVisualizerDecor(paused bool, termWidth int) *gotui.Element {
 			if paused && w > 0.92 {
 				ch = "◦"
 			}
-			
+
 			// Pulsing colors: Deep Navy to Soft Teal/Violet
 			hue := 240 + 40*math.Sin(phase*0.5) + 20*rowFrac + 20*w
 			sat := 0.30 + 0.20*w
 			lit := 0.10 + 0.10*w
-			
+
 			r8, g8, b8 := hslToRGB(hue, sat, lit)
 			line.AddChild(gotui.New(
 				gotui.WithText(ch),
@@ -1355,6 +1395,20 @@ func (a *app) modeLabel() string {
 	default:
 		return ""
 	}
+}
+
+func sanitizeBootstrapMessage(msg string) string {
+	low := strings.ToLower(msg)
+	if strings.Contains(low, "downloading binary") || strings.Contains(low, "downloading ffmpeg bundle") {
+		return "Downloading required dependency"
+	}
+	if strings.Contains(low, "binary downloaded") {
+		return "Dependency ready"
+	}
+	if strings.Contains(low, "using system binary") || strings.Contains(low, "using local cached binary") {
+		return "Initializing components"
+	}
+	return msg
 }
 
 func (a *app) playbackElapsed() string {
