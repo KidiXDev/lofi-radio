@@ -1,6 +1,6 @@
 # 🎧 Lofi Radio
 
-A sleek, lightweight command-line interface for streaming high-quality Lofi music directly from YouTube playlists. Built with Go, powered by `yt-dlp`, `ffmpeg`, and `go-tui`.
+A sleek, lightweight command-line interface for streaming high-quality Lofi music. Built with Go, powered by `yt-dlp`, `ffmpeg`, and `go-tui`.
 
 ![Go Version](https://img.shields.io/badge/Go-1.25.1-00ADD8?style=flat-square&logo=go)
 ![License](https://img.shields.io/badge/License-GPLv3-green?style=flat-square)
