@@ -100,6 +100,7 @@ type Player struct {
 	audioOnce    *sync.Once
 	pauseFlag    int32
 	ffmpegStderr *bytes.Buffer
+	fadePermille int32
 
 	// Viz is the exported visualizer state the TUI reads every frame.
 	Viz VisualizerBands
@@ -113,6 +114,7 @@ type PCMPlayer interface {
 func NewPlayer(initialVolume int) *Player {
 	p := &Player{volume: clampVolume(initialVolume)}
 	p.Viz.set([NumBands]float64{})
+	atomic.StoreInt32(&p.fadePermille, 1000)
 	return p
 }
 
@@ -124,7 +126,7 @@ func (p *Player) Play(streamURL string) error {
 }
 
 func (p *Player) playWithVolume(streamURL string, volume int) error {
-	if err := p.Stop(); err != nil {
+	if err := p.fadeOutAndStop(420 * time.Millisecond); err != nil {
 		return err
 	}
 	if pcmBitDepthBytes != 1 && pcmBitDepthBytes != 2 {
@@ -160,6 +162,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	waitCh := make(chan error, 1)
 	stopCh := make(chan struct{})
 	atomic.StoreInt32(&p.pauseFlag, 0)
+	atomic.StoreInt32(&p.fadePermille, 0)
 
 	go func() {
 		defer func() {
@@ -235,6 +238,8 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	p.audioOnce = audioOnce
 	p.ffmpegStderr = ffmpegStderr
 	p.mu.Unlock()
+
+	go p.fadeIn(320 * time.Millisecond)
 
 	return nil
 }
@@ -435,6 +440,14 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 		}
 		chunk := rawBuf[:n]
 		volScale := float64(clampVolume(p.Volume())) / 100.0
+		fadeScale := float64(atomic.LoadInt32(&p.fadePermille)) / 1000.0
+		if fadeScale < 0 {
+			fadeScale = 0
+		}
+		if fadeScale > 1 {
+			fadeScale = 1
+		}
+		volScale *= fadeScale
 		isPaused := atomic.LoadInt32(&p.pauseFlag) == 1
 		playBuf := make([]byte, len(chunk))
 		copy(playBuf, chunk)
@@ -750,6 +763,7 @@ func (p *Player) Stop() error {
 	ctx := p.audioCtx
 	p.audioCtx = nil
 	p.ffmpegStderr = nil
+	atomic.StoreInt32(&p.fadePermille, 1000)
 	p.mu.Unlock()
 	if stopCh != nil {
 		close(stopCh)
@@ -790,6 +804,65 @@ func (p *Player) Stop() error {
 	p.Viz.set([NumBands]float64{})
 	writeLog("playback.stopped")
 	return nil
+}
+
+func (p *Player) fadeOutAndStop(duration time.Duration) error {
+	if duration <= 0 {
+		return p.Stop()
+	}
+
+	if !p.IsRunning() {
+		return p.Stop()
+	}
+
+	const steps = 18
+	stepDur := duration / steps
+	if stepDur <= 0 {
+		stepDur = 15 * time.Millisecond
+	}
+
+	for i := steps - 1; i >= 0; i-- {
+		if !p.IsRunning() {
+			break
+		}
+		level := (i * 1000) / steps
+		atomic.StoreInt32(&p.fadePermille, int32(level))
+		time.Sleep(stepDur)
+	}
+	atomic.StoreInt32(&p.fadePermille, 0)
+	// Let the output buffer drain silence so process kill does not produce an audible cut.
+	time.Sleep(140 * time.Millisecond)
+
+	return p.Stop()
+}
+
+func (p *Player) fadeIn(duration time.Duration) {
+	if duration <= 0 {
+		atomic.StoreInt32(&p.fadePermille, 1000)
+		return
+	}
+	if !p.IsRunning() {
+		return
+	}
+
+	const steps = 14
+	stepDur := duration / steps
+	if stepDur <= 0 {
+		stepDur = 20 * time.Millisecond
+	}
+
+	for i := 1; i <= steps; i++ {
+		if !p.IsRunning() {
+			return
+		}
+		level := (i * 1000) / steps
+		if level > 1000 {
+			level = 1000
+		}
+		atomic.StoreInt32(&p.fadePermille, int32(level))
+		time.Sleep(stepDur)
+	}
+	atomic.StoreInt32(&p.fadePermille, 1000)
 }
 
 func firstNonNilErr(primary error, fallback error) error {

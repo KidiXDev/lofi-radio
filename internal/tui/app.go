@@ -269,7 +269,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 	case asyncFetchCategories:
 		if result.err != nil {
 			radio.LogErrorDetails(result.err)
-			a.setTransientError(radio.UserMessage(result.err))
+			a.handleSwitchError(radio.UserMessage(result.err))
 			return
 		}
 
@@ -295,7 +295,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 		if result.err != nil {
 			radio.Logf("ui.resolve.error err=%v", result.err)
 			radio.LogErrorDetails(result.err)
-			a.setTransientError(radio.UserMessage(result.err))
+			a.handleSwitchError(radio.UserMessage(result.err))
 			return
 		}
 
@@ -328,7 +328,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 		}
 		if result.err != nil {
 			radio.Logf("ui.play.error category=%q err=%v", result.category.Title, result.err)
-			a.setTransientError("Playback failed. Please try another category.")
+			a.handleSwitchError("Playback failed. Please try another category.")
 			return
 		}
 
@@ -377,7 +377,7 @@ func (a *app) onTick() {
 			if !ok || err == nil {
 				a.setTransientError("playback stopped")
 			} else {
-				a.setTransientError("Playback failed. Please try another category.")
+				a.handleSwitchError("Playback failed. Please try another category.")
 			}
 			return
 		default:
@@ -635,6 +635,22 @@ func (a *app) setTransientError(message string) {
 	a.footerHint.Set("Press q or Enter to return")
 	a.fatal = false
 	a.exitErr = nil
+}
+
+func (a *app) handleSwitchError(message string) {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		trimmed = "Operation failed. Please try another category."
+	}
+
+	if a.playing.Get() {
+		a.mode.Set(viewPlayer)
+		a.status.Set(trimmed + " Continuing current playback.")
+		a.footerHint.Set(playerHint)
+		return
+	}
+
+	a.setTransientError(trimmed)
 }
 
 func (a *app) setFatalError(err error, message string) {
