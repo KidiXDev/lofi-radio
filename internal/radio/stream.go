@@ -10,13 +10,13 @@ import (
 func GetDirectAudioURL(videoURL string) (string, error) {
 	writeLog("stream.resolve.start video_url=%q", videoURL)
 
-	// Prefer true audio-only formats first (YouTube live commonly exposes
-	// m4a/opus audio tracks separately; this avoids video-capable HLS master
-	// manifests that can break analyzer decoding and waste bandwidth).
+	// Prefer a resilient selector first. Newer yt-dlp + YouTube frequently
+	// requires JS runtime to expose exact audio-only itags; `bestaudio/best`
+	// still resolves quickly and avoids multi-pass failures on first connect.
 	audioOnlySelectors := []string{
+		"bestaudio/best",
 		"bestaudio[protocol!=m3u8]/bestaudio",
 		"140/251/250/249/bestaudio",
-		"bestaudio/best",
 	}
 
 	var (

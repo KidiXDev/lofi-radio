@@ -27,7 +27,6 @@ var preferredPCMProfile atomic.Value // string
 type pcmProfile struct {
 	name          string
 	withReconnect bool
-	strictMap     bool
 }
 
 // NumBands is the number of frequency bands exposed to the visualizer.
@@ -97,6 +96,7 @@ type Player struct {
 
 	audioCtx     *oto.Context
 	audioPlayer  PCMPlayer
+	audioOnce    *sync.Once
 	pauseFlag    int32
 	ffmpegStderr *bytes.Buffer
 
@@ -147,6 +147,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	}
 
 	audioPlayer := ctx.NewPlayer()
+	audioOnce := &sync.Once{}
 	waitCh := make(chan error, 1)
 	stopCh := make(chan struct{})
 	atomic.StoreInt32(&p.pauseFlag, 0)
@@ -154,7 +155,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	go func() {
 		atomic.StoreInt32(&p.Viz.active, 1)
 		defer atomic.StoreInt32(&p.Viz.active, 0)
-		defer func() { _ = audioPlayer.Close() }()
+		defer audioOnce.Do(func() { _ = audioPlayer.Close() })
 
 		currentCmd := ffmpeg
 		currentStream := stdout
@@ -213,6 +214,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	p.stopCh = stopCh
 	p.audioCtx = ctx
 	p.audioPlayer = audioPlayer
+	p.audioOnce = audioOnce
 	p.ffmpegStderr = ffmpegStderr
 	p.mu.Unlock()
 
@@ -221,13 +223,11 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 
 func startPCMFFmpegWithFallback(streamURL string) (*exec.Cmd, io.Reader, *bytes.Buffer, error) {
 	profiles := []pcmProfile{
-		{name: "reconnect+strict", withReconnect: true, strictMap: true},
-		{name: "reconnect+auto_map", withReconnect: true, strictMap: false},
-		{name: "plain+strict", withReconnect: false, strictMap: true},
-		{name: "plain+auto_map", withReconnect: false, strictMap: false},
+		{name: "reconnect", withReconnect: true},
+		{name: "plain", withReconnect: false},
 	}
-	// On YouTube HLS URLs, plain+auto_map is typically the fastest successful probe.
-	profiles = prioritizeProfiles(profiles, "plain+auto_map")
+	// On YouTube HLS URLs, plain is typically the fastest successful probe.
+	profiles = prioritizeProfiles(profiles, "plain")
 	if raw := preferredPCMProfile.Load(); raw != nil {
 		if lastGood, ok := raw.(string); ok && lastGood != "" {
 			profiles = prioritizeProfiles(profiles, lastGood)
@@ -236,7 +236,7 @@ func startPCMFFmpegWithFallback(streamURL string) (*exec.Cmd, io.Reader, *bytes.
 
 	var lastErr error
 	for _, profile := range profiles {
-		ffmpeg, stdout, stderrBuf, err := startPCMFFmpeg(streamURL, profile.withReconnect, profile.strictMap)
+		ffmpeg, stdout, stderrBuf, err := startPCMFFmpeg(streamURL, profile.withReconnect)
 		if err != nil {
 			lastErr = err
 			writeLog("player.play.ffmpeg_profile_failed profile=%q err=%v", profile.name, err)
@@ -341,7 +341,7 @@ func readFirstPCMChunk(stdout io.ReadCloser, ffmpeg *exec.Cmd, timeout time.Dura
 	}
 }
 
-func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec.Cmd, io.ReadCloser, *bytes.Buffer, error) {
+func startPCMFFmpeg(streamURL string, withReconnect bool) (*exec.Cmd, io.ReadCloser, *bytes.Buffer, error) {
 	args := []string{
 		"-loglevel", "error",
 		"-nostdin",
@@ -365,9 +365,6 @@ func startPCMFFmpeg(streamURL string, withReconnect bool, strictMap bool) (*exec
 		)
 	}
 	args = append(args, "-i", streamURL, "-vn", "-sn", "-dn")
-	// if strictMap {
-	// 	args = append(args, "-map", "0:a:0")
-	// }
 	args = append(args,
 		"-acodec", "pcm_s16le",
 		"-f", "s16le",
@@ -750,6 +747,8 @@ func (p *Player) Stop() error {
 	atomic.StoreInt32(&p.pauseFlag, 0)
 	player := p.audioPlayer
 	p.audioPlayer = nil
+	audioOnce := p.audioOnce
+	p.audioOnce = nil
 	ctx := p.audioCtx
 	p.audioCtx = nil
 	p.ffmpegStderr = nil
@@ -760,7 +759,11 @@ func (p *Player) Stop() error {
 
 	if cmd == nil {
 		if player != nil {
-			_ = player.Close()
+			if audioOnce != nil {
+				audioOnce.Do(func() { _ = player.Close() })
+			} else {
+				_ = player.Close()
+			}
 		}
 		if ctx != nil {
 			_ = ctx.Close()
@@ -777,7 +780,11 @@ func (p *Player) Stop() error {
 		<-waitCh
 	}
 	if player != nil {
-		_ = player.Close()
+		if audioOnce != nil {
+			audioOnce.Do(func() { _ = player.Close() })
+		} else {
+			_ = player.Close()
+		}
 	}
 	if ctx != nil {
 		_ = ctx.Close()
@@ -868,4 +875,3 @@ func clampVolume(value int) int {
 	}
 	return value
 }
-

@@ -32,6 +32,7 @@ type asyncKind string
 const (
 	asyncBootstrap asyncKind = "bootstrap"
 	asyncResolve   asyncKind = "resolve"
+	asyncPlay      asyncKind = "play"
 )
 
 type asyncResult struct {
@@ -270,8 +271,24 @@ func (a *app) onAsyncResult(result asyncResult) {
 			return
 		}
 
-		if err := a.player.Play(result.streamURL); err != nil {
-			a.setTransientError(fmt.Sprintf("playback failed: %v", err))
+		// Start playback off the UI loop; ffmpeg probe can block for seconds.
+		a.status.Set("Starting audio stream")
+		go func(resolveToken int, st radio.Station, streamURL string) {
+			err := a.player.Play(streamURL)
+			a.emitResult(asyncResult{
+				kind:         asyncPlay,
+				station:      st,
+				resolveToken: resolveToken,
+				err:          err,
+			})
+		}(result.resolveToken, result.station, result.streamURL)
+
+	case asyncPlay:
+		if result.resolveToken != a.resolveToken.Get() {
+			return
+		}
+		if result.err != nil {
+			a.setTransientError(fmt.Sprintf("playback failed: %v", result.err))
 			return
 		}
 
