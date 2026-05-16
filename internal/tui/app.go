@@ -509,7 +509,20 @@ func (a *app) emitResult(result asyncResult) {
 }
 
 func (a *app) Render(ui *gotui.App) *gotui.Element {
-	_ = ui
+	termWidth, termHeight := ui.Size()
+	rootVerticalPadding := 1
+	rootHorizontalPadding := 2
+	rootGap := 1
+	if termHeight < 30 {
+		rootVerticalPadding = 0
+	}
+	if termWidth < 110 {
+		rootHorizontalPadding = 1
+	}
+	if termHeight < 24 {
+		rootGap = 0
+	}
+	contentHeight := availableContentHeight(termHeight, rootVerticalPadding, rootGap)
 
 	// Warm sunset pulsing color
 	pulse := a.pulsePhase.Get()
@@ -518,59 +531,48 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 
 	root := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithHeightPercent(100),
-		gotui.WithGap(1),
-		gotui.WithPaddingTRBL(1, 2, 1, 2),
+		gotui.WithHeight(termHeight),
+		gotui.WithJustify(gotui.JustifyStart),
+		gotui.WithGap(rootGap),
+		gotui.WithPaddingTRBL(rootVerticalPadding, rootHorizontalPadding, rootVerticalPadding, rootHorizontalPadding),
+		gotui.WithOverflow(gotui.OverflowHidden),
 	)
 
-	// ── Header ──────────────────────────────────────────────
-	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
-	header := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(borderColor)),
-		gotui.WithPaddingTRBL(0, 2, 0, 2),
-		gotui.WithGap(2),
-	)
-	
-	header.AddChild(gotui.New(
-		gotui.WithText("⚡ RADIO LOFI"),
-		gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.Magenta).WithDirection(gotui.GradientHorizontal)),
-		gotui.WithTextStyle(gotui.NewStyle().Bold()),
-	))
-	header.AddChild(gotui.New(
-		gotui.WithText(spin),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-	))
-	header.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf(" |  %s", a.modeLabel())),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-	))
-
-	root.AddChild(header)
-
-	// ── Content ─────────────────────────────────────────────
-	content := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-	)
+	root.AddChild(a.renderHeader(borderColor))
+	var mainView *gotui.Element
 	switch a.mode.Get() {
 	case viewBoot:
-		content.AddChild(a.renderBoot())
+		mainView = a.renderBoot()
 	case viewSelect:
-		content.AddChild(a.renderSelector())
+		mainView = a.renderSelector(termWidth, termHeight, contentHeight)
 	case viewResolving:
-		content.AddChild(a.renderResolving())
+		mainView = a.renderResolving()
 	case viewPlayer:
-		content.AddChild(a.renderPlayer())
+		mainView = a.renderPlayer()
 	case viewError:
-		content.AddChild(a.renderError())
+		mainView = a.renderError()
 	}
-	root.AddChild(content)
+	mainSlot := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithHeight(contentHeight),
+		gotui.WithMinHeight(contentHeight),
+		gotui.WithMaxHeight(contentHeight),
+		gotui.WithFlexShrink(0),
+		gotui.WithJustify(gotui.JustifyStart),
+		gotui.WithOverflow(gotui.OverflowHidden),
+	)
+	if mainView != nil {
+		mainSlot.AddChild(mainView)
+	}
+	root.AddChild(mainSlot)
 
 	// ── Footer ──────────────────────────────────────────────
 	footer := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithHeight(3),
+		gotui.WithMinHeight(3),
+		gotui.WithMaxHeight(3),
+		gotui.WithFlexShrink(0),
 		gotui.WithBorder(gotui.BorderRounded),
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 		gotui.WithPaddingTRBL(0, 2, 0, 2),
@@ -586,6 +588,68 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 
 var spinnerBraille = []string{"⠋", "⠙", "⠸", "⠴", "⠦", "⠇"}
 
+func (a *app) renderHeader(borderColor gotui.Color) *gotui.Element {
+	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
+
+	header := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithHeight(3),
+		gotui.WithMinHeight(3),
+		gotui.WithMaxHeight(3),
+		gotui.WithFlexShrink(0),
+		gotui.WithJustify(gotui.JustifySpaceBetween),
+		gotui.WithAlign(gotui.AlignCenter),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(borderColor)),
+		gotui.WithPaddingTRBL(0, 2, 0, 2),
+	)
+
+	left := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithAlign(gotui.AlignCenter),
+		gotui.WithGap(1),
+		gotui.WithFlexGrow(1),
+	)
+	left.AddChild(gotui.New(
+		gotui.WithText("RADIO LOFI"),
+		gotui.WithWrap(false),
+		gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.Magenta).WithDirection(gotui.GradientHorizontal)),
+		gotui.WithTextStyle(gotui.NewStyle().Bold()),
+	))
+	left.AddChild(gotui.New(
+		gotui.WithText("|"),
+		gotui.WithWrap(false),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+	))
+	left.AddChild(gotui.New(
+		gotui.WithText(compactText(a.modeLabel(), 26)),
+		gotui.WithWrap(false),
+		gotui.WithTruncate(true),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+	))
+
+	right := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithAlign(gotui.AlignCenter),
+		gotui.WithGap(1),
+		gotui.WithFlexShrink(0),
+	)
+	right.AddChild(gotui.New(
+		gotui.WithText("SYNC"),
+		gotui.WithWrap(false),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
+	right.AddChild(gotui.New(
+		gotui.WithText(spin),
+		gotui.WithWrap(false),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightYellow).Bold()),
+	))
+
+	header.AddChild(left)
+	header.AddChild(right)
+	return header
+}
+
 func (a *app) renderBoot() *gotui.Element {
 	box := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
@@ -597,20 +661,12 @@ func (a *app) renderBoot() *gotui.Element {
 	)
 
 	asciiArt := []string{
-		`  _      ____  ______ _____ `,
-		` | |    / __ \|  ____|_   _|`,
-		` | |   | |  | | |__    | |  `,
-		` | |   | |  | |  __|   | |  `,
-		` | |___| |__| | |     _| |_ `,
-		` |______\____/|_|    |_____|`,
+		` _      ___  ___ ___`,
+		`| |    / _ \| __|_ _|`,
+		`| |__ | (_) | _| | | `,
+		`|____| \___/|_| |___|`,
 	}
-	for _, line := range asciiArt {
-		box.AddChild(gotui.New(
-			gotui.WithText(line),
-			gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.Red).WithDirection(gotui.GradientHorizontal)),
-			gotui.WithTextStyle(gotui.NewStyle().Bold()),
-		))
-	}
+	box.AddChild(renderASCIIBlock(asciiArt))
 
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 
@@ -641,69 +697,136 @@ func (a *app) renderBoot() *gotui.Element {
 	return box
 }
 
-func (a *app) renderSelector() *gotui.Element {
+func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.Element {
+	rowGap := 2
+	if termWidth < 110 {
+		rowGap = 1
+	}
+
 	row := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+		gotui.WithJustify(gotui.JustifyStart),
 		gotui.WithFlexGrow(1),
-		gotui.WithGap(2),
-	)
-
-	// Left: Decoration
-	left := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
-		gotui.WithPadding(1),
-		gotui.WithGap(1),
-	)
-	
-	asciiArt := []string{
-		`   __       __ _ `,
-		`  / /  ___ / _(_)`,
-		` / /  / _ \ |_| |`,
-		`/ /__| (_) |  | |`,
-		`\____/\___/|_||_|`,
-		`                 `,
-		`   _____         `,
-		`  / __/ |/ /    `,
-		` / _/ |   /     `,
-		`/___/ |__/      `,
-	}
-	for _, line := range asciiArt {
-		left.AddChild(gotui.New(
-			gotui.WithText(line),
-			gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.Red).WithDirection(gotui.GradientHorizontal)),
-			gotui.WithTextStyle(gotui.NewStyle().Bold()),
-		))
-	}
-	left.AddChild(gotui.New(gotui.WithHR()))
-	left.AddChild(gotui.New(
-		gotui.WithText(" SELECT STATION"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
-	))
-	left.AddChild(gotui.New(gotui.WithHR()))
-	left.AddChild(a.buildWaveVisualizer(false))
-
-	// Right: Compact list
-	right := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(2),
-		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Yellow)),
-		gotui.WithPadding(1),
+		gotui.WithGap(rowGap),
+		gotui.WithMinHeight(0),
+		gotui.WithOverflow(gotui.OverflowHidden),
 	)
 
 	stations := a.stations.Get()
 	selected := clamp(a.selected.Get(), 0, max(len(stations)-1, 0))
+	maxRows := selectorMaxRows(contentHeight)
 
-	if len(stations) == 0 {
-		right.AddChild(gotui.New(
-			gotui.WithText("  No stations available."),
+	sidebarWidth := 34.0
+	if termWidth < 120 {
+		sidebarWidth = 36.0
+	}
+	if termWidth < 100 {
+		sidebarWidth = 40.0
+	}
+
+	compactSidebar := contentHeight < 23
+	ultraCompactSidebar := contentHeight < 18
+
+	// Left: station browser panel
+	left := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithWidthPercent(sidebarWidth),
+		gotui.WithMinWidth(28),
+		gotui.WithFlexShrink(0),
+		gotui.WithMinHeight(0),
+		gotui.WithOverflow(gotui.OverflowHidden),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
+		gotui.WithPadding(1),
+		gotui.WithGap(0),
+	)
+
+	asciiArt := []string{
+		` _      ___  ___ ___`,
+		`| |    / _ \| __|_ _|`,
+		`| |__ | (_) | _| | | `,
+		`|____| \___/|_| |___|`,
+	}
+	if !ultraCompactSidebar {
+		left.AddChild(renderASCIIBlock(asciiArt))
+		left.AddChild(gotui.New(gotui.WithHR()))
+	}
+	left.AddChild(gotui.New(
+		gotui.WithText(" STATION BROWSER"),
+		gotui.WithWrap(false),
+		gotui.WithTruncate(true),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
+	))
+	left.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf(" Total: %d", len(stations))),
+		gotui.WithWrap(false),
+		gotui.WithTruncate(true),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+	))
+	if len(stations) > 0 {
+		left.AddChild(gotui.New(
+			gotui.WithText(fmt.Sprintf(" Selected: %d/%d", selected+1, len(stations))),
+			gotui.WithWrap(false),
+			gotui.WithTruncate(true),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		))
+	}
+	if !compactSidebar {
+		left.AddChild(gotui.New(gotui.WithHR()))
+		left.AddChild(gotui.New(
+			gotui.WithText(" ENTER: play"),
+			gotui.WithWrap(false),
+			gotui.WithTruncate(true),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
+		left.AddChild(gotui.New(
+			gotui.WithText(" UP/DOWN or k/j: navigate"),
+			gotui.WithWrap(false),
+			gotui.WithTruncate(true),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
+		left.AddChild(gotui.New(
+			gotui.WithText(" q or Esc: quit"),
+			gotui.WithWrap(false),
+			gotui.WithTruncate(true),
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 		))
 	} else {
-		maxRows := 8
+		left.AddChild(gotui.New(
+			gotui.WithText(" ENTER play | UP/DOWN navigate | q quit"),
+			gotui.WithWrap(false),
+			gotui.WithTruncate(true),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
+	}
+
+	// Right: station list
+	right := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithMinWidth(0),
+		gotui.WithMinHeight(0),
+		gotui.WithOverflow(gotui.OverflowHidden),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.Yellow)),
+		gotui.WithPadding(1),
+		gotui.WithGap(0),
+	)
+
+	right.AddChild(gotui.New(
+		gotui.WithText(" AVAILABLE STATIONS"),
+		gotui.WithWrap(false),
+		gotui.WithTruncate(true),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
+	))
+	right.AddChild(gotui.New(gotui.WithHR()))
+
+	if len(stations) == 0 {
+		right.AddChild(gotui.New(
+			gotui.WithText(" No stations available."),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
+	} else {
 		start := 0
 		if selected >= maxRows {
 			start = selected - maxRows + 1
@@ -722,7 +845,9 @@ func (a *app) renderSelector() *gotui.Element {
 					gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Red).Bold()),
 				))
 				r.AddChild(gotui.New(
-					gotui.WithText(compactText(stations[i].Title, 45)),
+					gotui.WithText(compactText(stations[i].Title, 56)),
+					gotui.WithWrap(false),
+					gotui.WithTruncate(true),
 					gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
 					gotui.WithTextStyle(gotui.NewStyle().Bold()),
 				))
@@ -730,7 +855,9 @@ func (a *app) renderSelector() *gotui.Element {
 			} else {
 				dim := gotui.NewStyle().Foreground(gotui.BrightBlack)
 				right.AddChild(gotui.New(
-					gotui.WithText(fmt.Sprintf("  %s", compactText(stations[i].Title, 47))),
+					gotui.WithText(fmt.Sprintf("  %s", compactText(stations[i].Title, 58))),
+					gotui.WithWrap(false),
+					gotui.WithTruncate(true),
 					gotui.WithTextStyle(dim),
 				))
 			}
@@ -759,7 +886,7 @@ func (a *app) renderResolving() *gotui.Element {
 		gotui.WithFlexGrow(1),
 		gotui.WithGap(1),
 	)
-	
+
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 	box.AddChild(gotui.New(
 		gotui.WithText(fmt.Sprintf("%s  Resolving stream...", spin)),
@@ -770,7 +897,10 @@ func (a *app) renderResolving() *gotui.Element {
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 	))
 	box.AddChild(gotui.New(gotui.WithHR()))
-	box.AddChild(a.buildWaveVisualizer(false))
+	box.AddChild(gotui.New(
+		gotui.WithText("  Press q to cancel and return to station list."),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+	))
 	return box
 }
 
@@ -791,7 +921,7 @@ func (a *app) renderPlayer() *gotui.Element {
 		gotui.WithPadding(2),
 		gotui.WithGap(1),
 	)
-	
+
 	station := a.currentStation.Get()
 	isPaused := a.paused.Get()
 
@@ -810,7 +940,7 @@ func (a *app) renderPlayer() *gotui.Element {
 		statusText = "⏸ PAUSED "
 		statusStyle = gotui.NewStyle().Foreground(gotui.BrightYellow)
 	}
-	
+
 	infoRow := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 		gotui.WithGap(3),
@@ -820,7 +950,7 @@ func (a *app) renderPlayer() *gotui.Element {
 		gotui.WithTextStyle(statusStyle.Bold()),
 	))
 	infoRow.AddChild(gotui.New(
-		gotui.WithText("TIME: " + a.playbackElapsed()),
+		gotui.WithText("TIME: "+a.playbackElapsed()),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite)),
 	))
 	leftCol.AddChild(infoRow)
@@ -854,19 +984,19 @@ func (a *app) renderPlayer() *gotui.Element {
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 		gotui.WithPadding(2),
 	)
-	
+
 	rightCol.AddChild(gotui.New(
 		gotui.WithText("VISUALIZER"),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 	))
 	rightCol.AddChild(gotui.New(gotui.WithHR()))
-	
+
 	visualizerBox := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithPaddingTRBL(2, 0, 0, 0),
 	)
 	visualizerBox.AddChild(a.buildWaveVisualizer(isPaused))
-	
+
 	rightCol.AddChild(visualizerBox)
 
 	row.AddChild(leftCol)
@@ -925,6 +1055,23 @@ func (a *app) renderError() *gotui.Element {
 		gotui.WithText("  ✖  "+strings.TrimSpace(a.errMessage.Get())),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightRed).Bold()),
 	))
+	return box
+}
+
+func renderASCIIBlock(lines []string) *gotui.Element {
+	box := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex),
+		gotui.WithDirection(gotui.Column),
+		gotui.WithGap(0),
+	)
+	for _, line := range lines {
+		box.AddChild(gotui.New(
+			gotui.WithText(line),
+			gotui.WithWrap(false),
+			gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.Red).WithDirection(gotui.GradientHorizontal)),
+			gotui.WithTextStyle(gotui.NewStyle().Bold()),
+		))
+	}
 	return box
 }
 
@@ -1105,6 +1252,20 @@ func compactText(value string, maxLen int) string {
 		return clean[:maxLen]
 	}
 	return clean[:maxLen-3] + "..."
+}
+
+func availableContentHeight(termHeight, rootVerticalPadding, rootGap int) int {
+	// Header/footer each render as a 3-row rounded box.
+	const headerHeight = 3
+	const footerHeight = 3
+	chrome := (rootVerticalPadding * 2) + (rootGap * 2) + headerHeight + footerHeight
+	return max(termHeight-chrome, 8)
+}
+
+func selectorMaxRows(contentHeight int) int {
+	// Rows available in right panel after border/padding/title+divider and selection meter.
+	rows := contentHeight - 9
+	return clamp(rows, 3, 14)
 }
 
 func clamp(value, minValue, maxValue int) int {
