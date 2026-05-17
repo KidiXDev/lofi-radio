@@ -21,8 +21,8 @@ A sleek, lightweight command-line interface for streaming high-quality Lofi musi
 Planned channel roadmap:
 - [x] **Lofi Girl**
 - [x] **Chillhop Music**
-- [ ] **the bootleg boy**
-- [ ] **STEEZYASFUCK**
+- [x] **the bootleg boy**
+- [x] **STEEZYASFUCK**
 - [ ] **The Jazz Hop Café**
 - [ ] **Homework Radio**
 - [ ] **Ambition**

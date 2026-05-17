@@ -29,6 +29,11 @@ var channels = []Channel{
 		Name:        "The Bootleg Boy",
 		PlaylistURL: "https://youtube.com/playlist?list=PLOzDu-MXXLlgdiaISfz-Vf9mkVsNW1Bw_&si=AeBUwg7WSsBYZLyt",
 	},
+	{
+		ID:          "steezyasfck",
+		Name:        "STEEZYASFUCK",
+		PlaylistURL: "https://youtube.com/playlist?list=PLqeSJS3N5tzhr13DqMJVXPPSio5UYS9sb&si=Ho1-4iCiBNRU2e-C",
+	},
 }
 
 func Channels() []Channel {
