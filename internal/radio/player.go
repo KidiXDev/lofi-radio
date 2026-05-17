@@ -367,7 +367,7 @@ func startPCMFFmpeg(streamURL string, withReconnect bool) (*exec.Cmd, io.ReadClo
 	args := []string{
 		"-loglevel", "error",
 		"-nostdin",
-		"-thread_queue_size", "1024",
+		"-thread_queue_size", "2048",
 	}
 	if withReconnect {
 		args = append(args,
@@ -406,11 +406,48 @@ func startPCMFFmpeg(streamURL string, withReconnect bool) (*exec.Cmd, io.ReadClo
 func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 	const (
 		bytesPerSample = pcmBitDepthBytes
-		noiseGate      = 0.008
 		minFreqHz      = 32.0
 		maxFreqHz      = 15000.0
+		pcmQueueChunks = 18
 	)
-	rawBuf := make([]byte, pcmChunkBytes)
+	type pcmPacket struct {
+		data []byte
+		err  error
+	}
+
+	packetCh := make(chan pcmPacket, pcmQueueChunks)
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		defer close(packetCh)
+		rawBuf := make([]byte, pcmChunkBytes)
+		for {
+			n, err := io.ReadAtLeast(r, rawBuf, bytesPerSample)
+			if rem := n % bytesPerSample; rem != 0 {
+				n -= rem
+			}
+
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, rawBuf[:n])
+				select {
+				case packetCh <- pcmPacket{data: chunk}:
+				case <-done:
+					return
+				}
+			}
+
+			if err != nil {
+				select {
+				case packetCh <- pcmPacket{err: err}:
+				case <-done:
+				}
+				return
+			}
+		}
+	}()
+
 	binState := make([]float64, NumBands) // smoothed output in [0,1]
 	binNorm := make([]float64, NumBands)  // adaptive per-band reference
 	fftIn := make([]float64, fftSize)
@@ -425,21 +462,25 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 	}
 
 	for {
-		n, err := io.ReadAtLeast(r, rawBuf, bytesPerSample)
-		if err != nil {
-			if (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) && n >= 2 {
-				// Just ignore for now
-			} else {
-				return err
+		packet, ok := <-packetCh
+		if !ok {
+			return io.EOF
+		}
+		if len(packet.data) == 0 {
+			if packet.err != nil {
+				return packet.err
 			}
-		}
-		if rem := n % bytesPerSample; rem != 0 {
-			n -= rem
-		}
-		if n == 0 {
 			continue
 		}
-		chunk := rawBuf[:n]
+
+		chunk := packet.data
+		n := len(chunk)
+		if n == 0 {
+			if packet.err != nil {
+				return packet.err
+			}
+			continue
+		}
 		volScale := float64(clampVolume(p.Volume())) / 100.0
 		fadeScale := float64(atomic.LoadInt32(&p.fadePermille)) / 1000.0
 		if fadeScale < 0 {
@@ -638,6 +679,9 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 		p.Viz.set(out)
 		if _, err := audioOut.Write(playBuf); err != nil {
 			return fmt.Errorf("write audio: %w", err)
+		}
+		if packet.err != nil {
+			return packet.err
 		}
 	}
 }
