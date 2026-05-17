@@ -1294,7 +1294,7 @@ func (a *app) renderChannelSelector(termWidth, termHeight, contentHeight int) *g
 			} else {
 				dim := gotui.NewStyle().Foreground(gotui.BrightBlack)
 				if isCurrent {
-					dim = dim.Foreground(gotui.Green).Dim()
+					dim = dim.Foreground(gotui.BrightGreen).Dim()
 				}
 				r.AddChild(gotui.New(
 					gotui.WithText(fmt.Sprintf("  %s", compactText(channel.Name, 50))),
@@ -1479,7 +1479,7 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 			} else {
 				dim := gotui.NewStyle().Foreground(gotui.BrightBlack)
 				if isCurrent {
-					dim = dim.Foreground(gotui.Green).Dim()
+					dim = dim.Foreground(gotui.BrightGreen).Dim()
 				}
 				r.AddChild(gotui.New(
 					gotui.WithText(fmt.Sprintf("  %s", compactText(category.Title, 50))),
@@ -1528,7 +1528,7 @@ func (a *app) renderResolving() *gotui.Element {
 	// Get resolving info
 	categories := a.categories.Get()
 	selected := a.selected.Get()
-	categoryTitle := "Unknown Station"
+	categoryTitle := "Unknown Category"
 	if selected >= 0 && selected < len(categories) {
 		categoryTitle = compactText(categories[selected].Title, 64)
 	}
@@ -1550,7 +1550,7 @@ func (a *app) renderResolving() *gotui.Element {
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 	))
 	box.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("STATION : %s", strings.ToUpper(categoryTitle))),
+		gotui.WithText(fmt.Sprintf("CATEGORY : %s", strings.ToUpper(categoryTitle))),
 		gotui.WithTextStyle(gotui.NewStyle().Bold().Foreground(gotui.BrightWhite)),
 	))
 
@@ -1696,14 +1696,14 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 	}
 
 	leftCol.AddChild(gotui.New(
-		gotui.WithText(compactText(category.Title, maxTitleLen)),
+		gotui.WithText(pingPongScrollText(category.Title, maxTitleLen, a.aniTick)),
 		gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
 		gotui.WithTextStyle(gotui.NewStyle().Bold()),
 		indent,
 	))
 	leftCol.AddChild(gotui.New(
 		gotui.WithText(strings.ToUpper(a.playingChannelName)),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightMagenta).Bold().Dim()),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan).Bold().Dim()),
 		indent,
 	))
 
@@ -2307,6 +2307,41 @@ func compactText(value string, maxLen int) string {
 		return clean[:maxLen]
 	}
 	return clean[:maxLen-3] + "..."
+}
+
+func pingPongScrollText(value string, maxLen int, tick int) string {
+	clean := strings.TrimSpace(strings.ReplaceAll(value, "\n", " "))
+	runes := []rune(clean)
+	L := len(runes)
+	if maxLen <= 0 || L <= maxLen {
+		return clean
+	}
+
+	M := L - maxLen
+	const waitTicks = 60
+	const ticksPerChar = 6
+
+	cycleLength := 2*waitTicks + 2*M*ticksPerChar
+	t := tick % cycleLength
+
+	if t < waitTicks {
+		return string(runes[:maxLen])
+	}
+	t -= waitTicks
+
+	if t < M*ticksPerChar {
+		idx := t / ticksPerChar
+		return string(runes[idx : idx+maxLen])
+	}
+	t -= M * ticksPerChar
+
+	if t < waitTicks {
+		return string(runes[M : M+maxLen])
+	}
+	t -= waitTicks
+
+	idx := max(M-(t/ticksPerChar), 0)
+	return string(runes[idx : idx+maxLen])
 }
 
 func availableContentHeight(termHeight, rootVerticalPadding, rootGap int) int {
