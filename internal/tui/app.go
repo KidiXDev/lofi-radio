@@ -1010,15 +1010,15 @@ func (a *app) Render(ui *gotui.App) *gotui.Element {
 	var mainView *gotui.Element
 	switch a.mode.Get() {
 	case viewBoot:
-		mainView = a.renderBoot()
+		mainView = a.renderBoot(contentHeight)
 	case viewChannelSelect:
 		mainView = a.renderChannelSelector(termWidth, termHeight, contentHeight)
 	case viewSelect:
 		mainView = a.renderSelector(termWidth, termHeight, contentHeight)
 	case viewResolving:
-		mainView = a.renderResolving()
+		mainView = a.renderResolving(contentHeight)
 	case viewPlayer:
-		mainView = a.renderPlayer(termWidth)
+		mainView = a.renderPlayer(termWidth, termHeight, contentHeight)
 	case viewUpdatePrompt:
 		mainView = a.renderUpdatePrompt()
 	case viewUpdating:
@@ -1164,23 +1164,92 @@ func (a *app) renderHeader(borderColor gotui.Color) *gotui.Element {
 	return header
 }
 
-func (a *app) renderBoot() *gotui.Element {
-	box := gotui.New(
+func (a *app) renderBoot(contentHeight int) *gotui.Element {
+	if strings.HasPrefix(a.status.Get(), "Connecting to") {
+		return a.renderConnectingToChannel(contentHeight)
+	}
+
+	opts := []gotui.Option{
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithBorder(gotui.BorderRounded),
 		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 40, 100))),
-		gotui.WithPadding(2),
+		gotui.WithHeight(contentHeight),
+		gotui.WithMinHeight(contentHeight),
+		gotui.WithMaxHeight(contentHeight),
 		gotui.WithFlexGrow(1),
-		gotui.WithGap(1),
-	)
-
-	asciiArt := []string{
-		` _      ___  ___ ___`,
-		`| |    / _ \| __|_ _|`,
-		`| |__ | (_) | _| | | `,
-		`|____| \___/|_| |___|`,
+		gotui.WithAlign(gotui.AlignCenter),
+		gotui.WithJustify(gotui.JustifyStart),
 	}
-	box.AddChild(renderASCIIBlock(asciiArt))
+
+	// Responsive padding & gaps
+	var topPadding, bottomPadding int
+	if contentHeight >= 14 {
+		opts = append(opts, gotui.WithPaddingTRBL(2, 4, 2, 4), gotui.WithGap(0))
+		topPadding = 2
+		bottomPadding = 2
+	} else if contentHeight >= 10 {
+		opts = append(opts, gotui.WithPaddingTRBL(1, 2, 1, 2), gotui.WithGap(0))
+		topPadding = 1
+		bottomPadding = 1
+	} else {
+		opts = append(opts, gotui.WithPaddingTRBL(0, 1, 0, 1), gotui.WithGap(0))
+		topPadding = 0
+		bottomPadding = 0
+	}
+
+	// Calculate vertical heights to center perfectly inside
+	childrenHeight := 0
+	if contentHeight >= 12 {
+		childrenHeight += 4 // ASCII art lines
+		if contentHeight >= 14 {
+			childrenHeight += 1 // ASCII spacer
+		}
+	} else {
+		childrenHeight += 1 // Boot text line
+	}
+
+	childrenHeight += 1 // Spinner message line
+
+	event := a.bootEvent.Get()
+	if event.Type == bootstrap.ProgressEventDownload {
+		childrenHeight += 1 // Progress bar
+		if contentHeight >= 11 {
+			childrenHeight += 1 // Progress detail line
+		}
+	}
+
+	insideHeight := contentHeight - 2 - topPadding - bottomPadding
+	topSpacer := 0
+	if insideHeight > childrenHeight {
+		topSpacer = (insideHeight - childrenHeight) / 2
+	}
+
+	box := gotui.New(opts...)
+
+	// Add top spacer to center vertically
+	if topSpacer > 0 {
+		box.AddChild(gotui.New(gotui.WithHeight(topSpacer)))
+	}
+
+	// RENDER CONTENT
+	if contentHeight >= 12 {
+		asciiArt := []string{
+			` _      ___  ___ ___`,
+			`| |    / _ \| __|_ _|`,
+			`| |__ | (_) | _| | | `,
+			`|____| \___/|_| |___|`,
+		}
+		box.AddChild(renderASCIIBlock(asciiArt))
+		if contentHeight >= 14 {
+			box.AddChild(gotui.New(gotui.WithHeight(1)))
+		}
+	} else {
+		box.AddChild(gotui.New(
+			gotui.WithText("── LOFI RADIO BOOT ──"),
+			gotui.WithTextStyle(gotui.NewStyle().Bold().Foreground(gotui.BrightWhite)),
+			gotui.WithTextGradient(gotui.NewGradient(gotui.RGBColor(255, 40, 100), gotui.RGBColor(255, 200, 40)).WithDirection(gotui.GradientHorizontal)),
+		))
+	}
 
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 
@@ -1189,7 +1258,6 @@ func (a *app) renderBoot() *gotui.Element {
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan)),
 	))
 
-	event := a.bootEvent.Get()
 	if event.Type == bootstrap.ProgressEventDownload {
 		label := "DOWNLOADING"
 		totalLabel := "unknown"
@@ -1200,11 +1268,123 @@ func (a *app) renderBoot() *gotui.Element {
 			gotui.WithText(fmt.Sprintf("  %s  %s", label, renderFancyBar(event.Download.BytesReceived, event.Download.TotalBytes, 24))),
 			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightYellow)),
 		))
+		if contentHeight >= 11 {
+			box.AddChild(gotui.New(
+				gotui.WithText(fmt.Sprintf("  %s / %s   %s", humanBytes(event.Download.BytesReceived), totalLabel, humanSpeed(event.Download.SpeedPerSec))),
+				gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+			))
+		}
+	}
+	return box
+}
+
+func (a *app) renderConnectingToChannel(contentHeight int) *gotui.Element {
+	pulse := a.pulsePhase.Get()
+	borderColor := gotui.NewGradient(gotui.RGBColor(0, 220, 255), gotui.RGBColor(255, 0, 200)).At((math.Cos(pulse) + 1) / 2)
+
+	opts := []gotui.Option{
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithBorder(gotui.BorderRounded),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(borderColor)), // Glowing border
+		gotui.WithHeight(contentHeight),
+		gotui.WithMinHeight(contentHeight),
+		gotui.WithMaxHeight(contentHeight),
+		gotui.WithFlexGrow(1),
+		gotui.WithAlign(gotui.AlignCenter),
+		gotui.WithJustify(gotui.JustifyStart),
+	}
+
+	// Responsive Padding & Gaps based on contentHeight
+	var topPadding, bottomPadding int
+	if contentHeight >= 17 {
+		opts = append(opts, gotui.WithPaddingTRBL(2, 4, 2, 4), gotui.WithGap(0))
+		topPadding = 2
+		bottomPadding = 2
+	} else if contentHeight >= 11 {
+		opts = append(opts, gotui.WithPaddingTRBL(1, 2, 1, 2), gotui.WithGap(0))
+		topPadding = 1
+		bottomPadding = 1
+	} else {
+		opts = append(opts, gotui.WithPaddingTRBL(0, 1, 0, 1), gotui.WithGap(0))
+		topPadding = 0
+		bottomPadding = 0
+	}
+
+	// Calculate vertical heights to center perfectly inside
+	childrenHeight := 0
+	if contentHeight >= 16 {
+		childrenHeight += 5 // ASCII block lines
+		if contentHeight >= 17 {
+			childrenHeight += 1 // Spacer height
+		}
+	} else {
+		childrenHeight += 1 // Station Text line
+	}
+
+	if contentHeight >= 11 {
+		childrenHeight += 1 // Station Detail line
+	}
+
+	childrenHeight += 1 // Station name line
+
+	if contentHeight >= 15 {
+		childrenHeight += 1 // Pre-status spacer height
+	}
+
+	childrenHeight += 1 // Status spinner line
+
+	insideHeight := contentHeight - 2 - topPadding - bottomPadding
+	topSpacer := 0
+	if insideHeight > childrenHeight {
+		topSpacer = (insideHeight - childrenHeight) / 2
+	}
+
+	box := gotui.New(opts...)
+
+	// Add top spacer to center vertically
+	if topSpacer > 0 {
+		box.AddChild(gotui.New(gotui.WithHeight(topSpacer)))
+	}
+
+	tunerGradient := gotui.NewGradient(gotui.RGBColor(0, 255, 200), gotui.RGBColor(255, 0, 200)).WithDirection(gotui.GradientHorizontal)
+
+	// 1. Beautiful ASCII text: TUNING
+	if contentHeight >= 16 {
+		box.AddChild(renderASCIIBlock([]string{
+			` _____ _   _ _   _ ___ _   _  ____ `,
+			`|_   _| | | | \ | |_ _| \ | |/ ___|`,
+			`  | | | | | |  \| || ||  \| | |  _ `,
+			`  | | | |_| | |\  || || |\  | |_| |`,
+			`  |_|  \___/|_| \_|___|_| \_|\____|`,
+		}))
+		if contentHeight >= 17 {
+			box.AddChild(gotui.New(gotui.WithHeight(1)))
+		}
+	} else {
 		box.AddChild(gotui.New(
-			gotui.WithText(fmt.Sprintf("  %s / %s   %s", humanBytes(event.Download.BytesReceived), totalLabel, humanSpeed(event.Download.SpeedPerSec))),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+			gotui.WithText("── TUNING TO STATION ──"),
+			gotui.WithTextStyle(gotui.NewStyle().Bold().Foreground(gotui.BrightWhite)),
+			gotui.WithTextGradient(tunerGradient),
 		))
 	}
+
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf(" %s ", strings.ToUpper(a.channelName))),
+		gotui.WithTextStyle(gotui.NewStyle().Bold().Foreground(gotui.BrightWhite)),
+		gotui.WithTextGradient(tunerGradient),
+	))
+
+	if contentHeight >= 15 {
+		box.AddChild(gotui.New(gotui.WithHeight(1)))
+	}
+
+	// 4. Progress Telemetry
+	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf("%s  LOADING CATEGORIES...", spin)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan).Bold()),
+	))
+
 	return box
 }
 
@@ -1571,17 +1751,70 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 	return row
 }
 
-func (a *app) renderResolving() *gotui.Element {
-	box := gotui.New(
+func (a *app) renderResolving(contentHeight int) *gotui.Element {
+	opts := []gotui.Option{
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 40, 100))),
-		gotui.WithPaddingTRBL(1, 2, 1, 2),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 120, 0))), // Sunset orange border
+		gotui.WithHeight(contentHeight),
+		gotui.WithMinHeight(contentHeight),
+		gotui.WithMaxHeight(contentHeight),
 		gotui.WithFlexGrow(1),
-		gotui.WithGap(0),
 		gotui.WithAlign(gotui.AlignCenter),
-		gotui.WithJustify(gotui.JustifyCenter),
-	)
+		gotui.WithJustify(gotui.JustifyStart),
+	}
+
+	// Responsive padding & gaps
+	var topPadding, bottomPadding int
+	if contentHeight >= 17 {
+		opts = append(opts, gotui.WithPaddingTRBL(2, 4, 2, 4), gotui.WithGap(0))
+		topPadding = 2
+		bottomPadding = 2
+	} else if contentHeight >= 11 {
+		opts = append(opts, gotui.WithPaddingTRBL(1, 2, 1, 2), gotui.WithGap(0))
+		topPadding = 1
+		bottomPadding = 1
+	} else {
+		opts = append(opts, gotui.WithPaddingTRBL(0, 1, 0, 1), gotui.WithGap(0))
+		topPadding = 0
+		bottomPadding = 0
+	}
+
+	// Calculate vertical heights to center perfectly inside
+	childrenHeight := 0
+	if contentHeight >= 16 {
+		childrenHeight += 5 // ASCII block lines
+		if contentHeight >= 17 {
+			childrenHeight += 1 // Spacer height
+		}
+	} else {
+		childrenHeight += 1 // STREAM text line
+	}
+
+	if contentHeight >= 11 {
+		childrenHeight += 1 // Category Detail line
+	}
+
+	childrenHeight += 1 // Category name line
+
+	if contentHeight >= 15 {
+		childrenHeight += 1 // Pre-status spacer height
+	}
+
+	childrenHeight += 1 // Status spinner line
+
+	insideHeight := contentHeight - 2 - topPadding - bottomPadding
+	topSpacer := 0
+	if insideHeight > childrenHeight {
+		topSpacer = (insideHeight - childrenHeight) / 2
+	}
+
+	box := gotui.New(opts...)
+
+	// Add top spacer to center vertically
+	if topSpacer > 0 {
+		box.AddChild(gotui.New(gotui.WithHeight(topSpacer)))
+	}
 
 	// Get resolving info
 	categories := a.categories.Get()
@@ -1591,60 +1824,43 @@ func (a *app) renderResolving() *gotui.Element {
 		categoryTitle = compactText(categories[selected].Title, 64)
 	}
 
-	// 1. ASCII Header
-	box.AddChild(renderASCIIBlock([]string{
-		` _____ _   _ _   _ ___ _   _  ____ `,
-		`|_   _| | | | \ | |_ _| \ | |/ ___|`,
-		`  | | | | | |  \| || ||  \| | |  _ `,
-		`  | | | |_| | |\  || || |\  | |_| |`,
-		`  |_|  \___/|_| \_|___|_| \_|\____|`,
-	}))
+	resolvingGradient := gotui.NewGradient(gotui.RGBColor(255, 140, 0), gotui.RGBColor(255, 230, 0)).WithDirection(gotui.GradientHorizontal)
 
-	box.AddChild(gotui.New(gotui.WithHeight(1)))
-
-	// 2. Station Info
-	box.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("CHANNEL : %s", strings.ToUpper(a.channelName))),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-	))
-	box.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("CATEGORY : %s", strings.ToUpper(categoryTitle))),
-		gotui.WithTextStyle(gotui.NewStyle().Bold().Foreground(gotui.BrightWhite)),
-	))
-
-	box.AddChild(gotui.New(gotui.WithHeight(1)))
-
-	// 3. Pulsing signal animation
-	pulse := a.pulsePhase.Get()
-	animRow := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(2),
-		gotui.WithAlign(gotui.AlignCenter),
-		gotui.WithHeight(1),
-	)
-	for i := 0; i < 7; i++ {
-		dist := math.Abs(float64(i) - 3)
-		active := math.Sin(pulse*6.0-dist*1.5) > 0.4
-		char := "⠂"
-		style := gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()
-		if active {
-			char = "⦿"
-			style = gotui.NewStyle().Foreground(gotui.BrightMagenta).Bold()
+	// 1. Beautiful ASCII text: STREAM
+	if contentHeight >= 16 {
+		box.AddChild(renderASCIIBlock([]string{
+			`  ____ _____ ____  _____   _    __  __ `,
+			` / ___|_   _|  _ \| ____| / \  |  \/  |`,
+			` \___ \ | | | |_) |  _|  / _ \ | |\/| |`,
+			`  ___)| | | |  _ <| |___/ ___ \| |  | |`,
+			` |____/ |_| |_| \_\_____/_/  \_\_|  |_|`,
+		}))
+		if contentHeight >= 17 {
+			box.AddChild(gotui.New(gotui.WithHeight(1)))
 		}
-		animRow.AddChild(gotui.New(
-			gotui.WithText(char),
-			gotui.WithTextStyle(style),
+	} else {
+		box.AddChild(gotui.New(
+			gotui.WithText("── CONNECTING TO STREAM ──"),
+			gotui.WithTextStyle(gotui.NewStyle().Bold().Foreground(gotui.BrightWhite)),
+			gotui.WithTextGradient(resolvingGradient),
 		))
 	}
-	box.AddChild(animRow)
 
-	box.AddChild(gotui.New(gotui.WithHeight(1)))
+	box.AddChild(gotui.New(
+		gotui.WithText(fmt.Sprintf(" %s ── %s ", strings.ToUpper(a.channelName), strings.ToUpper(categoryTitle))),
+		gotui.WithTextStyle(gotui.NewStyle().Bold().Foreground(gotui.BrightWhite)),
+		gotui.WithTextGradient(resolvingGradient),
+	))
+
+	if contentHeight >= 15 {
+		box.AddChild(gotui.New(gotui.WithHeight(1)))
+	}
 
 	// 4. Status
 	spin := spinnerBraille[a.spinnerFrame.Get()%len(spinnerBraille)]
 	box.AddChild(gotui.New(
 		gotui.WithText(fmt.Sprintf("%s  CONNECTING TO SERVER...", spin)),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.Magenta)),
+		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightYellow).Bold()),
 	))
 
 	return box
@@ -1716,7 +1932,50 @@ func (a *app) renderUpdating() *gotui.Element {
 	return box
 }
 
-func (a *app) renderPlayer(termWidth int) *gotui.Element {
+func (a *app) buildCassetteArt(isPaused bool) []string {
+	spinners := []string{"◐", "◓", "◑", "◒"}
+	var spinL, spinR string
+	statusText := "  P L A Y I N G  "
+	if isPaused {
+		spinL = "o"
+		spinR = "o"
+		statusText = "  P A U S E D    "
+	} else {
+		frame := a.spinnerFrame.Get()
+		spinL = spinners[frame%len(spinners)]
+		spinR = spinners[(frame+2)%len(spinners)]
+	}
+
+	return []string{
+		`  +-------------------------+`,
+		fmt.Sprintf(`  | [%s]   (lofi-deck)   [%s] |`, spinL, spinR),
+		`  |   +-----------------+   |`,
+		fmt.Sprintf(`  |   |  %s  |   |`, statusText),
+		`  |   +-----------------+   |`,
+		`  +-------------------------+`,
+	}
+}
+
+func (a *app) buildCompactCassetteArt(isPaused bool) []string {
+	spinners := []string{"◐", "◓", "◑", "◒"}
+	var spinL, spinR string
+	if isPaused {
+		spinL = "o"
+		spinR = "o"
+	} else {
+		frame := a.spinnerFrame.Get()
+		spinL = spinners[frame%len(spinners)]
+		spinR = spinners[(frame+2)%len(spinners)]
+	}
+
+	return []string{
+		`  +-------------------------+`,
+		fmt.Sprintf(`  | [%s]   (lofi-deck)   [%s] |`, spinL, spinR),
+		`  +-------------------------+`,
+	}
+}
+
+func (a *app) renderPlayer(termWidth, termHeight, contentHeight int) *gotui.Element {
 	// Root row container
 	row := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
@@ -1727,14 +1986,17 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 	category := a.currentCategory.Get()
 	isPaused := a.paused.Get()
 
-	// LEFT COLUMN (Info & Controls - 40% width)
+	// LEFT COLUMN (Info & Controls - 38% width)
 	leftCol := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithWidth(int(float64(termWidth)*0.38)),
 		gotui.WithMinWidth(42),
 		gotui.WithFlexShrink(0),
+		gotui.WithHeight(contentHeight),
+		gotui.WithMinHeight(contentHeight),
+		gotui.WithMaxHeight(contentHeight),
 		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 0, 150))), // Synthwave Pink
 		gotui.WithPaddingTRBL(1, 2, 1, 2),
 		gotui.WithGap(0),
 	)
@@ -1742,243 +2004,434 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 	// Consistent Indentation
 	indent := gotui.WithPaddingTRBL(0, 1, 0, 0)
 
-	// 1. Station Section
-	leftCol.AddChild(gotui.New(
-		gotui.WithText("● STATION"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold()),
-	))
-
 	maxTitleLen := 32
 	if termWidth > 130 {
 		maxTitleLen = 42
 	}
 
-	leftCol.AddChild(gotui.New(
-		gotui.WithText(pingPongScrollText(category.Title, maxTitleLen, a.aniTick)),
-		gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
-		gotui.WithTextStyle(gotui.NewStyle().Bold()),
-		indent,
-	))
-	leftCol.AddChild(gotui.New(
-		gotui.WithText(strings.ToUpper(a.playingChannelName)),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan).Bold().Dim()),
-		indent,
-	))
-
-	// 2. Playback Section
-	leftCol.AddChild(gotui.New(gotui.WithHR()))
-	leftCol.AddChild(gotui.New(
-		gotui.WithText("● STATUS"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold()),
-	))
-
-	infoRow := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(2),
-		gotui.WithAlign(gotui.AlignCenter),
-		indent,
-	)
-
-	vinylFrames := []string{"◐", "◓", "◑", "◒"}
-	vinyl := "⊙"
-	if !isPaused {
-		vinyl = vinylFrames[a.spinnerFrame.Get()%len(vinylFrames)]
+	vol := a.volume.Get()
+	speakerLabel := "VOL"
+	if vol == 0 {
+		speakerLabel = "MUTE"
 	}
-	infoRow.AddChild(gotui.New(
-		gotui.WithText(vinyl),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan).Bold()),
-	))
 
-	statusText := "PLAYING"
-	statusStyle := gotui.NewStyle().Foreground(gotui.BrightGreen)
-	if isPaused {
-		statusText = "PAUSED "
-		statusStyle = gotui.NewStyle().Foreground(gotui.BrightYellow)
-	}
-	infoRow.AddChild(gotui.New(
-		gotui.WithText(statusText),
-		gotui.WithTextStyle(statusStyle.Bold()),
-	))
-	infoRow.AddChild(gotui.New(
-		gotui.WithText(a.playbackElapsed()),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
-	))
-	leftCol.AddChild(infoRow)
-
-	// Signal & Quality
-	sigRow := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(2),
-		indent,
-	)
 	playbackStats := a.player.Stats()
 	sigIdx, bitrateText := signalAndBitrate(playbackStats)
 	sigBars := []string{" ", "▂", "▃", "▅", "▆", "█"}
-	sigRow.AddChild(gotui.New(
-		gotui.WithText("SIG "+sigBars[sigIdx]),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-	))
-	sigRow.AddChild(gotui.New(
-		gotui.WithText(bitrateText),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-	leftCol.AddChild(sigRow)
 
-	// 3. Audio Section
-	leftCol.AddChild(gotui.New(gotui.WithHR()))
-	leftCol.AddChild(gotui.New(
-		gotui.WithText("● VOLUME"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold()),
-	))
+	// RESPONSIVE LAYOUT DISPATCHER
+	if contentHeight >= 20 {
+		// 1. Station Section
+		leftCol.AddChild(gotui.New(
+			gotui.WithText(" [STATION]"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold().Dim()),
+		))
+		leftCol.AddChild(gotui.New(
+			gotui.WithText(" > "+pingPongScrollText(category.Title, maxTitleLen, a.aniTick)),
+			gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
+			gotui.WithTextStyle(gotui.NewStyle().Bold()),
+			indent,
+		))
+		leftCol.AddChild(gotui.New(
+			gotui.WithText("   "+strings.ToUpper(a.playingChannelName)),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan).Bold().Dim()),
+			indent,
+		))
 
-	vol := a.volume.Get()
-	volRow := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(1),
-		gotui.WithAlign(gotui.AlignCenter),
-		indent,
-	)
-	volRow.AddChild(gotui.New(
-		gotui.WithText(renderFancyBar(int64(vol), 100, 16)),
-		gotui.WithTextGradient(gotui.NewGradient(gotui.RGBColor(140, 60, 255), gotui.RGBColor(255, 60, 140)).WithDirection(gotui.GradientHorizontal)),
-		gotui.WithTextStyle(gotui.NewStyle().Bold()),
-	))
-	volRow.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("%d%%", vol)),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
-	))
-	leftCol.AddChild(volRow)
+		// 2. Cassette Deck
+		leftCol.AddChild(gotui.New(gotui.WithHR()))
+		leftCol.AddChild(gotui.New(
+			gotui.WithText(" [CASSETTE DECK]"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold().Dim()),
+		))
 
-	// RIGHT COLUMN (Visuals - 60% width)
-	rightCol := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-		gotui.WithGap(0),
-	)
+		cassetteLines := a.buildCassetteArt(isPaused)
+		cassetteBox := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+			gotui.WithGap(0),
+			gotui.WithPaddingTRBL(0, 1, 0, 0),
+		)
 
-	// Top: Background Decor
-	decorBox := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
-		gotui.WithPaddingTRBL(0, 2, 0, 2),
-	)
+		cassetteGradient := gotui.NewGradient(gotui.RGBColor(255, 0, 150), gotui.RGBColor(0, 200, 255)).WithDirection(gotui.GradientHorizontal)
+		for _, line := range cassetteLines {
+			cassetteBox.AddChild(gotui.New(
+				gotui.WithText(line),
+				gotui.WithWrap(false),
+				gotui.WithTextGradient(cassetteGradient),
+				gotui.WithTextStyle(gotui.NewStyle().Bold()),
+			))
+		}
+		leftCol.AddChild(cassetteBox)
 
-	decorBox.AddChild(gotui.New(
-		gotui.WithText("● SPECTRUM WATERFALL"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold()),
-	))
+		// 3. Playback Section
+		leftCol.AddChild(gotui.New(gotui.WithHR()))
+		leftCol.AddChild(gotui.New(
+			gotui.WithText(" [PLAYBACK STATS]"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold().Dim()),
+		))
 
-	// Create a waterfall plot with 4 frequency rows
-	waterfall := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-		gotui.WithJustify(gotui.JustifyCenter),
-		gotui.WithGap(0),
-	)
+		infoRow := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(2),
+			gotui.WithAlign(gotui.AlignCenter),
+			indent,
+		)
 
-	histChars := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
-	maxHistLen := (termWidth - 42) - 10
+		statusText := "PLAYING"
+		statusStyle := gotui.NewStyle().Foreground(gotui.BrightGreen)
+		if isPaused {
+			statusText = "PAUSED "
+			statusStyle = gotui.NewStyle().Foreground(gotui.BrightYellow)
+		}
+		infoRow.AddChild(gotui.New(
+			gotui.WithText(statusText),
+			gotui.WithTextStyle(statusStyle.Bold()),
+		))
+		infoRow.AddChild(gotui.New(
+			gotui.WithText(a.playbackElapsed()),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
+		))
+		leftCol.AddChild(infoRow)
 
-	bandLabels := []string{" HI ", " MID", " LOW", " BASS"}
-	bandGradients := []gotui.Gradient{
-		gotui.NewGradient(gotui.RGBColor(200, 100, 255), gotui.RGBColor(255, 100, 200)),
-		gotui.NewGradient(gotui.RGBColor(100, 150, 255), gotui.RGBColor(150, 100, 255)),
-		gotui.NewGradient(gotui.RGBColor(50, 200, 200), gotui.RGBColor(100, 200, 255)),
-		gotui.NewGradient(gotui.RGBColor(50, 255, 150), gotui.RGBColor(50, 200, 200)),
-	}
+		// Signal & Quality
+		sigRow := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(2),
+			indent,
+		)
+		sigRow.AddChild(gotui.New(
+			gotui.WithText("SIGNAL: "+sigBars[sigIdx]),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		))
+		sigRow.AddChild(gotui.New(
+			gotui.WithText(bitrateText),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
+		leftCol.AddChild(sigRow)
 
-	for i := 0; i < 4; i++ {
-		row := gotui.New(
+		// Engine info line
+		metaRow := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(1),
+			indent,
+		)
+		metaRow.AddChild(gotui.New(
+			gotui.WithText("ENGINE: MP3/AAC DIRECT DECODE"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
+		))
+		leftCol.AddChild(metaRow)
+
+		// 4. Audio Section
+		leftCol.AddChild(gotui.New(gotui.WithHR()))
+		leftCol.AddChild(gotui.New(
+			gotui.WithText(" [AUDIO VOLUME]"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold().Dim()),
+		))
+
+		volRow := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(1),
+			gotui.WithAlign(gotui.AlignCenter),
+			indent,
+		)
+
+		volGradient := gotui.NewGradient(gotui.RGBColor(0, 255, 200), gotui.RGBColor(255, 0, 150)).WithDirection(gotui.GradientHorizontal)
+		volRow.AddChild(gotui.New(
+			gotui.WithText(speakerLabel+" "+renderFancyBar(int64(vol), 100, 16)),
+			gotui.WithTextGradient(volGradient),
+			gotui.WithTextStyle(gotui.NewStyle().Bold()),
+		))
+		volRow.AddChild(gotui.New(
+			gotui.WithText(fmt.Sprintf("%d%%", vol)),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
+		))
+		leftCol.AddChild(volRow)
+
+	} else if contentHeight >= 14 {
+		// Medium Height layout
+		leftCol.AddChild(gotui.New(
+			gotui.WithText(" [STATION]"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold().Dim()),
+		))
+		leftCol.AddChild(gotui.New(
+			gotui.WithText("> "+pingPongScrollText(category.Title, maxTitleLen, a.aniTick)),
+			gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
+			gotui.WithTextStyle(gotui.NewStyle().Bold()),
+			indent,
+		))
+
+		leftCol.AddChild(gotui.New(gotui.WithHR()))
+
+		cassetteLines := a.buildCompactCassetteArt(isPaused)
+		cassetteBox := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+			gotui.WithGap(0),
+			gotui.WithPaddingTRBL(0, 1, 0, 0),
+		)
+		cassetteGradient := gotui.NewGradient(gotui.RGBColor(255, 0, 150), gotui.RGBColor(0, 200, 255)).WithDirection(gotui.GradientHorizontal)
+		for _, line := range cassetteLines {
+			cassetteBox.AddChild(gotui.New(
+				gotui.WithText(line),
+				gotui.WithWrap(false),
+				gotui.WithTextGradient(cassetteGradient),
+				gotui.WithTextStyle(gotui.NewStyle().Bold()),
+			))
+		}
+		leftCol.AddChild(cassetteBox)
+
+		leftCol.AddChild(gotui.New(gotui.WithHR()))
+
+		statusText := "PLAYING"
+		statusStyle := gotui.NewStyle().Foreground(gotui.BrightGreen)
+		if isPaused {
+			statusText = "PAUSED "
+			statusStyle = gotui.NewStyle().Foreground(gotui.BrightYellow)
+		}
+
+		// Combined Stats & Volume
+		leftCol.AddChild(gotui.New(
+			gotui.WithText(" [PLAYBACK & VOLUME]"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold().Dim()),
+		))
+
+		statRow := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(1),
+			indent,
+		)
+		statRow.AddChild(gotui.New(
+			gotui.WithText(statusText+" "+a.playbackElapsed()+" | "+speakerLabel),
+			gotui.WithTextStyle(statusStyle.Bold()),
+		))
+		statRow.AddChild(gotui.New(
+			gotui.WithText(fmt.Sprintf(" %d%%", vol)),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
+		))
+		leftCol.AddChild(statRow)
+
+		sigRow := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(1),
+			indent,
+		)
+		sigRow.AddChild(gotui.New(
+			gotui.WithText("SIGNAL: "+sigBars[sigIdx]+" | "+bitrateText),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		))
+		leftCol.AddChild(sigRow)
+
+	} else {
+		// Low height layout (ultra compact)
+		leftCol := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+			gotui.WithWidth(int(float64(termWidth)*0.38)),
+			gotui.WithMinWidth(42),
+			gotui.WithFlexShrink(0),
+			gotui.WithHeight(contentHeight),
+			gotui.WithMinHeight(contentHeight),
+			gotui.WithMaxHeight(contentHeight),
+			gotui.WithBorder(gotui.BorderRounded),
+			gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 0, 150))), // Synthwave Pink
+			gotui.WithPaddingTRBL(0, 2, 0, 2),
+			gotui.WithGap(0),
+		)
+
+		leftCol.AddChild(gotui.New(
+			gotui.WithText("> "+pingPongScrollText(category.Title, maxTitleLen-4, a.aniTick)),
+			gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
+			gotui.WithTextStyle(gotui.NewStyle().Bold()),
+		))
+
+		statusText := "PLAYING"
+		statusStyle := gotui.NewStyle().Foreground(gotui.BrightGreen)
+		if isPaused {
+			statusText = "PAUSED "
+			statusStyle = gotui.NewStyle().Foreground(gotui.BrightYellow)
+		}
+
+		statRow := gotui.New(
 			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
 			gotui.WithGap(1),
 		)
-
-		row.AddChild(gotui.New(
-			gotui.WithText(bandLabels[i]),
-			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim().Bold()),
+		statRow.AddChild(gotui.New(
+			gotui.WithText(statusText+" "+a.playbackElapsed()+" | "+speakerLabel+fmt.Sprintf(" %d%%", vol)),
+			gotui.WithTextStyle(statusStyle.Bold()),
 		))
+		leftCol.AddChild(statRow)
 
-		if maxHistLen > 8 {
-			history := a.vizHistory
-			histWidth := maxHistLen - 6
-			if len(history) > histWidth {
-				history = history[len(history)-histWidth:]
-			}
-
-			graphStr := ""
-			for _, entry := range history {
-				val := entry[3-i]
-				val *= 1.4
-				idx := int(val * float64(len(histChars)-1))
-				if idx < 0 {
-					idx = 0
-				}
-				if idx >= len(histChars) {
-					idx = len(histChars) - 1
-				}
-				graphStr += histChars[idx]
-			}
-			row.AddChild(gotui.New(
-				gotui.WithText(graphStr),
-				gotui.WithTextGradient(bandGradients[i]),
-			))
-		}
-		waterfall.AddChild(row)
+		sigRow := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(1),
+		)
+		sigRow.AddChild(gotui.New(
+			gotui.WithText("SIGNAL: "+sigBars[sigIdx]+" | ENGINE: MP3/AAC"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		))
+		leftCol.AddChild(sigRow)
 	}
 
-	// Add technical labels to the bottom of decor box
-	statsRow := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-		gotui.WithGap(4),
+	// RIGHT COLUMN (Visuals - 62% width)
+	rightCol := gotui.New(
+		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+		gotui.WithFlexGrow(1),
+		gotui.WithHeight(contentHeight),
+		gotui.WithMinHeight(contentHeight),
+		gotui.WithMaxHeight(contentHeight),
+		gotui.WithGap(0),
 	)
 
-	peak := 0.0
-	for _, entry := range a.vizHistory {
-		for _, v := range entry {
-			if v > peak {
-				peak = v
-			}
-		}
-	}
-
-	statsRow.AddChild(gotui.New(
-		gotui.WithText(fmt.Sprintf("PEAK: %.2f", peak)),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-	statsRow.AddChild(gotui.New(
-		gotui.WithText("DSP: 32-BAND FFT"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-	statsRow.AddChild(gotui.New(
-		gotui.WithText("RES: 33MS / 128PT"),
-		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
-	))
-
-	decorBox.AddChild(waterfall)
-	decorBox.AddChild(statsRow)
-
-	// Bottom: Wave Visualizer
+	// Responsive heights for right column boxes
 	vizHeight := 7
 	vizRows := 4
 	if termWidth >= 145 {
 		vizHeight = 8
 		vizRows = 5
 	}
+
+	if contentHeight < 14 {
+		// Adjust for tiny terminal height
+		vizHeight = 5
+		vizRows = 3
+	}
+
+	// Check if we should render both Waterfall and Wave Visualizer
+	if contentHeight >= 11 {
+		// Top: Background Decor (Waterfall)
+		decorBox := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+			gotui.WithFlexGrow(1),
+			gotui.WithBorder(gotui.BorderRounded),
+			gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.RGBColor(0, 180, 255))), // Cyber Teal
+			gotui.WithPaddingTRBL(0, 2, 0, 2),
+		)
+
+		decorBox.AddChild(gotui.New(
+			gotui.WithText(" [SPECTRUM WATERFALL]"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold().Dim()),
+		))
+
+		// Create a waterfall plot with 4 frequency rows (responsive)
+		waterfall := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+			gotui.WithFlexGrow(1),
+			gotui.WithJustify(gotui.JustifyCenter),
+			gotui.WithGap(0),
+		)
+
+		histChars := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+		maxHistLen := (termWidth - 42) - 10
+
+		bandLabels := []string{" HI ", " MID", " LOW", " BASS"}
+		bandGradients := []gotui.Gradient{
+			gotui.NewGradient(gotui.RGBColor(200, 100, 255), gotui.RGBColor(255, 100, 200)),
+			gotui.NewGradient(gotui.RGBColor(100, 150, 255), gotui.RGBColor(150, 100, 255)),
+			gotui.NewGradient(gotui.RGBColor(50, 200, 200), gotui.RGBColor(100, 200, 255)),
+			gotui.NewGradient(gotui.RGBColor(50, 255, 150), gotui.RGBColor(50, 200, 200)),
+		}
+
+		// Adjust rows if height is tight
+		waterfallRows := 4
+		if contentHeight < 15 {
+			waterfallRows = 3
+		}
+
+		for i := 0; i < waterfallRows; i++ {
+			row := gotui.New(
+				gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+				gotui.WithGap(1),
+			)
+
+			row.AddChild(gotui.New(
+				gotui.WithText(bandLabels[i]),
+				gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim().Bold()),
+			))
+
+			if maxHistLen > 8 {
+				history := a.vizHistory
+				histWidth := maxHistLen - 6
+				if len(history) > histWidth {
+					history = history[len(history)-histWidth:]
+				}
+
+				graphStr := ""
+				for _, entry := range history {
+					val := entry[3-i]
+					val *= 1.4
+					idx := int(val * float64(len(histChars)-1))
+					if idx < 0 {
+						idx = 0
+					}
+					if idx >= len(histChars) {
+						idx = len(histChars) - 1
+					}
+					graphStr += histChars[idx]
+				}
+				row.AddChild(gotui.New(
+					gotui.WithText(graphStr),
+					gotui.WithTextGradient(bandGradients[i]),
+				))
+			}
+			waterfall.AddChild(row)
+		}
+
+		// Add technical labels to the bottom of decor box
+		statsRow := gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
+			gotui.WithGap(3),
+		)
+
+		peak := 0.0
+		for _, entry := range a.vizHistory {
+			for _, v := range entry {
+				if v > peak {
+					peak = v
+				}
+			}
+		}
+
+		statsRow.AddChild(gotui.New(
+			gotui.WithText(fmt.Sprintf("[PEAK: %.2f]", peak)),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(255, 0, 128)).Bold()),
+		))
+		statsRow.AddChild(gotui.New(
+			gotui.WithText("[DSP: 32-BAND]"),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightCyan).Bold()),
+		))
+
+		decorBox.AddChild(waterfall)
+		decorBox.AddChild(statsRow)
+		rightCol.AddChild(decorBox)
+	}
+
+	// Bottom: Wave Visualizer Box
+	pulse := a.pulsePhase.Get()
+	vizBorderColor := gotui.NewGradient(gotui.RGBColor(0, 200, 255), gotui.RGBColor(255, 0, 200)).At((math.Cos(pulse) + 1) / 2)
 	visualizerBox := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
 		gotui.WithHeight(vizHeight),
 		gotui.WithMinHeight(vizHeight),
 		gotui.WithMaxHeight(vizHeight),
 		gotui.WithBorder(gotui.BorderRounded),
-		gotui.WithBorderStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
+		gotui.WithBorderStyle(gotui.NewStyle().Foreground(vizBorderColor)),
 		gotui.WithPaddingTRBL(0, 1, 0, 1),
 	)
 
-	visualizerBox.AddChild(a.buildWaveVisualizer(isPaused, termWidth, vizRows))
+	// If no waterfall is rendered, let the wave visualizer grow to fill the space
+	if contentHeight < 11 {
+		visualizerBox = gotui.New(
+			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
+			gotui.WithFlexGrow(1),
+			gotui.WithBorder(gotui.BorderRounded),
+			gotui.WithBorderStyle(gotui.NewStyle().Foreground(vizBorderColor)),
+			gotui.WithPaddingTRBL(0, 1, 0, 1),
+		)
+		vizRows = contentHeight - 2
+		if vizRows < 3 {
+			vizRows = 3
+		}
+	}
 
-	rightCol.AddChild(decorBox)
+	visualizerBox.AddChild(a.buildWaveVisualizer(isPaused, termWidth, vizRows))
 	rightCol.AddChild(visualizerBox)
 
 	row.AddChild(leftCol)
