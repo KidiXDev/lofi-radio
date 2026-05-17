@@ -67,14 +67,65 @@ func newYtDlpFriendlyError(op string, runErr error, stderr, genericMessage strin
 	}
 }
 
+func cleanYtDlpError(errLine string) string {
+	errLine = strings.TrimSpace(errLine)
+
+	// Strip "ERROR:" prefix (case-insensitive)
+	if strings.HasPrefix(strings.ToLower(errLine), "error:") {
+		errLine = errLine[len("error:"):]
+		errLine = strings.TrimSpace(errLine)
+	}
+
+	// Strip video extractor, e.g. "[youtube]"
+	if strings.HasPrefix(errLine, "[") {
+		idx := strings.Index(errLine, "]")
+		if idx != -1 {
+			errLine = errLine[idx+1:]
+			errLine = strings.TrimSpace(errLine)
+		}
+	}
+
+	// Strip video ID, e.g. "HBPtQVzRZUY: " if present before the colon
+	if idx := strings.Index(errLine, ": "); idx != -1 {
+		prefix := errLine[:idx]
+		if !strings.Contains(prefix, " ") && len(prefix) < 30 {
+			errLine = errLine[idx+2:]
+			errLine = strings.TrimSpace(errLine)
+		}
+	}
+
+	return errLine
+}
+
 func mapYtDlpMessage(stderr, fallback string) string {
-	low := strings.ToLower(stderr)
+	// Split by newline to find the actual ERROR lines
+	var errorLines []string
+	for _, line := range strings.Split(stderr, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Match exact/sub "ERROR:" prefix
+		if strings.Contains(strings.ToUpper(trimmed), "ERROR:") {
+			errorLines = append(errorLines, trimmed)
+		}
+	}
+
+	// Determine the main text for matching and processing
+	var targetText string
+	var isFromErrorLine bool
+	if len(errorLines) > 0 {
+		targetText = errorLines[0]
+		isFromErrorLine = true
+	} else {
+		targetText = stderr
+	}
+
+	low := strings.ToLower(targetText)
 
 	switch {
 	case strings.Contains(low, "this live event will begin in"):
 		return "This category is scheduled and not live yet. Choose another category."
-	case strings.Contains(low, "no supported javascript runtime could be found"):
-		return "Cannot extract stream metadata. Please update yt-dlp or install a JS runtime (Node.js or Deno)."
 	case strings.Contains(low, "video unavailable"),
 		strings.Contains(low, "private video"),
 		strings.Contains(low, "deleted video"),
@@ -92,12 +143,24 @@ func mapYtDlpMessage(stderr, fallback string) string {
 		strings.Contains(low, "name resolution"),
 		strings.Contains(low, "network is unreachable"):
 		return "Network error while contacting YouTube. Check your connection and try again."
-	default:
-		if strings.TrimSpace(fallback) != "" {
-			return fallback
-		}
-		return "Failed to fetch stream data from YouTube."
+	case strings.Contains(low, "no supported javascript runtime could be found"):
+		// Only return the JS runtime missing message if we didn't have a more specific ERROR line!
+		return "Cannot extract stream metadata. Please update yt-dlp or install a JS runtime (Node.js or Deno)."
 	}
+
+	// If we got a specific error line but it didn't match any standard friendly categories,
+	// clean it up and show the raw/original YouTube error directly!
+	if isFromErrorLine {
+		cleaned := cleanYtDlpError(targetText)
+		if cleaned != "" {
+			return cleaned
+		}
+	}
+
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return "Failed to fetch stream data from YouTube."
 }
 
 func WrapFriendly(op, message string, err error) error {
