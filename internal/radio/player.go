@@ -104,6 +104,15 @@ type Player struct {
 
 	// Viz is the exported visualizer state the TUI reads every frame.
 	Viz VisualizerBands
+
+	statsMu         sync.Mutex
+	bytesWritten    int64
+	rateSampleBytes int64
+	rateSampleAt    time.Time
+	rateKbps        float64
+	reconnects      int64
+	lastWriteUnix   int64
+	lastReconnect   int64
 }
 
 type PCMPlayer interface {
@@ -111,10 +120,20 @@ type PCMPlayer interface {
 	Close() error
 }
 
+type PlaybackStats struct {
+	OutputKbps    float64
+	Reconnects    int64
+	LastWrite     time.Time
+	LastReconnect time.Time
+	AnalyzerFresh bool
+	Running       bool
+}
+
 func NewPlayer(initialVolume int) *Player {
 	p := &Player{volume: clampVolume(initialVolume)}
 	p.Viz.set([NumBands]float64{})
 	atomic.StoreInt32(&p.fadePermille, 1000)
+	p.resetStats()
 	return p
 }
 
@@ -129,6 +148,7 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 	if err := p.fadeOutAndStop(420 * time.Millisecond); err != nil {
 		return err
 	}
+	p.resetStats()
 	if pcmBitDepthBytes != 1 && pcmBitDepthBytes != 2 {
 		err := fmt.Errorf("unsupported bit depth for oto v1: %d (expected 1 or 2)", pcmBitDepthBytes)
 		writeLog("playback.config_error err=%v", err)
@@ -202,6 +222,8 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 			// Any EOF / ffmpeg exit during live playback is treated as transient:
 			// attempt fast restart on the same stream URL.
 			restarts++
+			atomic.StoreInt64(&p.reconnects, int64(restarts))
+			atomic.StoreInt64(&p.lastReconnect, time.Now().UnixNano())
 			writeLog("playback.interrupted attempt=%d err=%v", restarts, firstNonNilErr(err, waitErr))
 			restartStartedAt := time.Now()
 			time.Sleep(450 * time.Millisecond)
@@ -680,6 +702,7 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 		if _, err := audioOut.Write(playBuf); err != nil {
 			return fmt.Errorf("write audio: %w", err)
 		}
+		p.recordAudioWrite(len(playBuf))
 		if packet.err != nil {
 			return packet.err
 		}
@@ -998,6 +1021,68 @@ func (p *Player) Volume() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.volume
+}
+
+func (p *Player) Stats() PlaybackStats {
+	now := time.Now()
+	p.statsMu.Lock()
+	if p.rateSampleAt.IsZero() {
+		p.rateSampleAt = now
+		p.rateSampleBytes = p.bytesWritten
+	}
+	if elapsed := now.Sub(p.rateSampleAt); elapsed >= 250*time.Millisecond {
+		deltaBytes := p.bytesWritten - p.rateSampleBytes
+		instKbps := (float64(deltaBytes) * 8) / elapsed.Seconds() / 1000.0
+		if instKbps < 0 {
+			instKbps = 0
+		}
+		if p.rateKbps == 0 {
+			p.rateKbps = instKbps
+		} else {
+			p.rateKbps = p.rateKbps*0.75 + instKbps*0.25
+		}
+		p.rateSampleAt = now
+		p.rateSampleBytes = p.bytesWritten
+	}
+	kbps := p.rateKbps
+	lastWriteUnix := p.lastWriteUnix
+	p.statsMu.Unlock()
+
+	stats := PlaybackStats{
+		OutputKbps:    kbps,
+		Reconnects:    atomic.LoadInt64(&p.reconnects),
+		AnalyzerFresh: p.Viz.IsFresh(1200 * time.Millisecond),
+		Running:       p.IsRunning(),
+	}
+	if lastWriteUnix > 0 {
+		stats.LastWrite = time.Unix(0, lastWriteUnix)
+	}
+	if lastReconnect := atomic.LoadInt64(&p.lastReconnect); lastReconnect > 0 {
+		stats.LastReconnect = time.Unix(0, lastReconnect)
+	}
+	return stats
+}
+
+func (p *Player) resetStats() {
+	p.statsMu.Lock()
+	p.bytesWritten = 0
+	p.rateSampleBytes = 0
+	p.rateSampleAt = time.Now()
+	p.rateKbps = 0
+	p.lastWriteUnix = 0
+	p.statsMu.Unlock()
+	atomic.StoreInt64(&p.reconnects, 0)
+	atomic.StoreInt64(&p.lastReconnect, 0)
+}
+
+func (p *Player) recordAudioWrite(bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	p.statsMu.Lock()
+	p.bytesWritten += int64(bytes)
+	p.lastWriteUnix = time.Now().UnixNano()
+	p.statsMu.Unlock()
 }
 
 func clampVolume(value int) int {

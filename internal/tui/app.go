@@ -1811,15 +1811,15 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 		gotui.WithGap(2),
 		indent,
 	)
+	playbackStats := a.player.Stats()
+	sigIdx, bitrateText := signalAndBitrate(playbackStats)
 	sigBars := []string{" ", "▂", "▃", "▅", "▆", "█"}
-	sigIdx := 3 + int(math.Sin(a.pulsePhase.Get()*3.0)*2.0)
-	sigIdx = clamp(sigIdx, 1, 5)
 	sigRow.AddChild(gotui.New(
 		gotui.WithText("SIG "+sigBars[sigIdx]),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack)),
 	))
 	sigRow.AddChild(gotui.New(
-		gotui.WithText("192KBPS"),
+		gotui.WithText(bitrateText),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Dim()),
 	))
 	leftCol.AddChild(sigRow)
@@ -1866,7 +1866,7 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 	)
 
 	decorBox.AddChild(gotui.New(
-		gotui.WithText("● SPECTRUM WATERFALL (HISTORY)"),
+		gotui.WithText("● SPECTRUM WATERFALL"),
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightBlack).Bold()),
 	))
 
@@ -1909,9 +1909,7 @@ func (a *app) renderPlayer(termWidth int) *gotui.Element {
 
 			graphStr := ""
 			for _, entry := range history {
-				// Reverse i for display (HI at top, BASS at bottom)
 				val := entry[3-i]
-				// Auto-scale a bit for better visibility
 				val *= 1.4
 				idx := int(val * float64(len(histChars)-1))
 				if idx < 0 {
@@ -2353,6 +2351,28 @@ func humanDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh %02dm", hours, minutes)
 	}
 	return fmt.Sprintf("%02d:%02d", minutes, seconds)
+}
+
+func signalAndBitrate(stats radio.PlaybackStats) (int, string) {
+	if !stats.Running {
+		return 1, "0KBPS"
+	}
+
+	bitrateText := fmt.Sprintf("%.0fKBPS", stats.OutputKbps)
+	if stats.OutputKbps < 1 {
+		bitrateText = "0KBPS"
+	}
+
+	// PCM output target: 48kHz * stereo * 16-bit ~= 1536 kbps.
+	base := clamp(int(math.Round((stats.OutputKbps/1536.0)*5.0)), 1, 5)
+	if !stats.AnalyzerFresh {
+		base -= 1
+	}
+	if !stats.LastReconnect.IsZero() && time.Since(stats.LastReconnect) <= 8*time.Second {
+		base -= 1
+	}
+	base = clamp(base, 1, 5)
+	return base, bitrateText
 }
 
 func compactText(value string, maxLen int) string {
