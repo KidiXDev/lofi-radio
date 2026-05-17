@@ -93,12 +93,19 @@ We are continuously working to make **Lofi Radio** the best terminal-based lofi 
 - [x] **TUI Category Picker**: Add a screen to switch between different lofi providers seamlessly.
 - [x] **Volume Control**: Native volume adjustment within the TUI.
 - [x] **Visualizers**: Add an ASCII-based audio visualizer for that extra retro feel.
+- [x] **Auto Detect FFMPEG and yt-dlp** : Automatically detect FFMPEG and yt-dlp and install them if not found.
 - [ ] **Favorites**: Bookmark specific tracks or streams.
 - [ ] **Sleep Timer**: Automatically stop playback after a set duration.
+- [ ] **Discord Rich Presence**: Add Discord Rich Presence to show current music category and channel.
+- [ ] **Detach Mode**: Run in background support
+- [ ] **Custom Playlist**: Add support for custom playlists.
+- [ ] **Auto Update**: Add support for auto updates.
+- [x] **Linux Support**: Add support for Linux.
+- [x] **Windows Support**: Add support for Windows.
+- [ ] **MacOS Support**: Add support for MacOS.
 
 and more to come !
 
 ## 📜 License
 
 Distributed under the [GNU General Public License v3.0](LICENSE).
-
