@@ -1708,7 +1708,7 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 				}
 
 				r.AddChild(gotui.New(
-					gotui.WithText(compactText(category.Title, 48)),
+					gotui.WithText(pingPongScrollText(category.Title, 48, a.aniTick)),
 					gotui.WithWrap(false),
 					gotui.WithTruncate(true),
 					gotui.WithTextGradient(gotui.NewGradient(gotui.Yellow, gotui.BrightWhite).WithDirection(gotui.GradientHorizontal)),
