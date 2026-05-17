@@ -9,7 +9,7 @@ func FetchCategoriesFromPlaylist(playlistURL string) ([]Category, error) {
 	stdout, stderr, err := runYtDlp(
 		"--flat-playlist",
 		"--encoding", "utf-8",
-		"--print", "%(title)s\t%(id)s",
+		"--print", "%(title)s\t%(id)s\t%(live_status)s",
 		playlistURL,
 	)
 	if err != nil {
@@ -31,14 +31,19 @@ func FetchCategoriesFromPlaylist(playlistURL string) ([]Category, error) {
 			continue
 		}
 
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
 			continue
 		}
 
 		title := strings.TrimSpace(parts[0])
 		videoID := strings.TrimSpace(parts[1])
-		if title == "" || videoID == "" || isUnavailableEntry(title) {
+		liveStatus := ""
+		if len(parts) >= 3 {
+			liveStatus = strings.TrimSpace(parts[2])
+		}
+
+		if title == "" || videoID == "" || isUnavailableEntry(title, liveStatus) {
 			continue
 		}
 
@@ -72,10 +77,18 @@ func normalizeVideoURL(value string) string {
 	return "https://www.youtube.com/watch?v=" + value
 }
 
-func isUnavailableEntry(title string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(title))
+func isUnavailableEntry(title, liveStatus string) bool {
+	normalizedTitle := strings.ToLower(strings.TrimSpace(title))
+	normalizedStatus := strings.ToLower(strings.TrimSpace(liveStatus))
 
-	return strings.Contains(normalized, "private video") ||
-		strings.Contains(normalized, "deleted video") ||
-		normalized == "[unavailable video]"
+	if normalizedStatus == "is_upcoming" || normalizedStatus == "was_live" || normalizedStatus == "post_live" {
+		return true
+	}
+
+	return strings.Contains(normalizedTitle, "private video") ||
+		strings.Contains(normalizedTitle, "deleted video") ||
+		strings.Contains(normalizedTitle, "unavailable") ||
+		strings.Contains(normalizedTitle, "not available") ||
+		strings.Contains(normalizedTitle, "upcoming video") ||
+		strings.Contains(normalizedTitle, "upcoming live stream")
 }
