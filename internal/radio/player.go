@@ -367,6 +367,7 @@ func startPCMFFmpeg(streamURL string, withReconnect bool) (*exec.Cmd, io.ReadClo
 	args := []string{
 		"-loglevel", "error",
 		"-nostdin",
+		"-thread_queue_size", "1024",
 	}
 	if withReconnect {
 		args = append(args,
