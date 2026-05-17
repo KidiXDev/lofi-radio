@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	gotui "github.com/grindlemire/go-tui"
@@ -63,6 +64,7 @@ type app struct {
 	playingChannelURL  string
 	playingChannelName string
 	channels           []config.Channel
+	configManager      *config.Manager
 
 	mode       *gotui.State[viewMode]
 	status     *gotui.State[string]
@@ -103,12 +105,19 @@ type app struct {
 	updateRelease update.ReleaseInfo
 	updateError   string
 
+	persistMu            sync.Mutex
+	persistTimer         *time.Timer
+	persistPendingVolume int
+	persistDirty         bool
+
 	exitErr error
 	fatal   bool
 }
 
-func Run(channelName, playlistURL string) error {
-	component := newApp(channelName, playlistURL)
+const volumePersistDebounce = 600 * time.Millisecond
+
+func Run(channelName, playlistURL string, settings config.Settings, manager *config.Manager) error {
+	component := newApp(channelName, playlistURL, settings, manager)
 
 	ui, err := gotui.NewApp(
 		gotui.WithRootComponent(component),
@@ -118,6 +127,7 @@ func Run(channelName, playlistURL string) error {
 	}
 	defer ui.Close()
 	defer component.player.Stop()
+	defer component.flushPersistVolume()
 
 	if err := ui.Run(); err != nil {
 		return err
@@ -126,11 +136,15 @@ func Run(channelName, playlistURL string) error {
 	return component.exitErr
 }
 
-func newApp(channelName, playlistURL string) *app {
+func newApp(channelName, playlistURL string, settings config.Settings, manager *config.Manager) *app {
+	settings = config.NormalizeSettings(settings)
+	initialVolume := settings.Audio.Volume
+
 	component := &app{
-		channelName: channelName,
-		playlistURL: playlistURL,
-		channels:    config.Channels(),
+		channelName:   channelName,
+		playlistURL:   playlistURL,
+		channels:      config.Channels(),
+		configManager: manager,
 
 		mode:       gotui.NewState(viewBoot),
 		status:     gotui.NewState("Checking dependencies"),
@@ -140,9 +154,9 @@ func newApp(channelName, playlistURL string) *app {
 		selected:   gotui.NewState(0),
 		bootEvent:  gotui.NewState(bootstrap.ProgressEvent{}),
 
-		player:          radio.NewPlayer(55),
+		player:          radio.NewPlayer(initialVolume),
 		currentCategory: gotui.NewState(radio.Category{}),
-		volume:          gotui.NewState(55),
+		volume:          gotui.NewState(initialVolume),
 		playing:         gotui.NewState(false),
 		paused:          gotui.NewState(false),
 		playStartedAt:   gotui.NewState(time.Time{}),
@@ -700,6 +714,50 @@ func (a *app) adjustVolume(delta int) {
 	}
 
 	a.volume.Set(volume)
+	a.persistVolume(volume)
+}
+
+func (a *app) persistVolume(volume int) {
+	if a.configManager == nil {
+		return
+	}
+
+	a.persistMu.Lock()
+	a.persistPendingVolume = volume
+	a.persistDirty = true
+	if a.persistTimer != nil {
+		a.persistTimer.Stop()
+	}
+	a.persistTimer = time.AfterFunc(volumePersistDebounce, func() {
+		a.flushPersistVolume()
+	})
+	a.persistMu.Unlock()
+}
+
+func (a *app) flushPersistVolume() {
+	if a.configManager == nil {
+		return
+	}
+
+	a.persistMu.Lock()
+	if a.persistTimer != nil {
+		a.persistTimer.Stop()
+		a.persistTimer = nil
+	}
+	if !a.persistDirty {
+		a.persistMu.Unlock()
+		return
+	}
+	volume := a.persistPendingVolume
+	a.persistDirty = false
+	a.persistMu.Unlock()
+
+	_, err := a.configManager.Update(func(settings *config.Settings) {
+		settings.Audio.Volume = volume
+	})
+	if err != nil {
+		radio.Logf("ui.config.save.error err=%v", err)
+	}
 }
 
 func (a *app) goToSelector(status string) {

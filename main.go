@@ -82,7 +82,19 @@ func main() {
 		}
 	}
 
-	if err := tui.Run(selectedChannel.Name, selectedChannel.PlaylistURL); err != nil {
+	configManager, err := config.NewDefaultManager()
+	if err != nil {
+		fmt.Printf("Error: failed to initialize config manager: %v\n", err)
+		os.Exit(1)
+	}
+
+	settings, err := configManager.Load()
+	if err != nil {
+		fmt.Printf("Error: failed to load persisted config: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := tui.Run(selectedChannel.Name, selectedChannel.PlaylistURL, settings, configManager); err != nil {
 		radio.Logf("main.error err=%v", err)
 		fmt.Println("Error:", err)
 		os.Exit(1)

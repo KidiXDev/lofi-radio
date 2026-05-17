@@ -90,7 +90,8 @@ Installer behavior:
 
 We are continuously working to make **Lofi Radio** the best terminal-based lofi player. Here is what we have planned:
 
-- [x] **TUI Category Picker**: Add a screen to switch between different lofi providers seamlessly.
+- [x] **TUI Category Picker**: Add a screen to switch between different lofi categories seamlessly.
+- [x] **TUI Channels Picker**: Add a screen to switch between different lofi channels seamlessly.
 - [x] **Volume Control**: Native volume adjustment within the TUI.
 - [x] **Visualizers**: Add an ASCII-based audio visualizer for that extra retro feel.
 - [x] **Auto Detect FFMPEG and yt-dlp** : Automatically detect FFMPEG and yt-dlp and install them if not found.
