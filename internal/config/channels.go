@@ -41,6 +41,11 @@ var channels = []Channel{
 		Name:     "Claude FM",
 		VideoURL: stringPtr("https://www.youtube.com/live/YmQ7jRgf4f0?si=SDCDv_vrOeQgoqk9"),
 	},
+	{
+		ID:         "homework-radio",
+		Name:       "Homework Radio",
+		ChannelURL: stringPtr("https://www.youtube.com/@HomeworkRadio"),
+	},
 }
 
 func stringPtr(v string) *string {

@@ -25,7 +25,7 @@ Planned channel roadmap:
 - [x] **STEEZYASFUCK**
 - [x] **Claude FM**
 - [ ] **The Jazz Hop Café**
-- [ ] **Homework Radio**
+- [x] **Homework Radio**
 - [ ] **Ambition**
 - [ ] **Dreamy**
 - [ ] **Lofi Geek**
