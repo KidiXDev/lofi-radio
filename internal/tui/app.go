@@ -60,6 +60,7 @@ type asyncResult struct {
 }
 
 type app struct {
+	ui                 *gotui.App
 	channelName        string
 	currentChannel     config.Channel
 	playingChannelURL  string
@@ -182,6 +183,7 @@ func newApp(channel config.Channel, settings config.Settings, manager *config.Ma
 }
 
 func (a *app) BindApp(ui *gotui.App) {
+	a.ui = ui
 	a.mode.BindApp(ui)
 	a.status.BindApp(ui)
 	a.errMessage.BindApp(ui)
@@ -414,10 +416,23 @@ func (a *app) onAsyncResult(result asyncResult) {
 		}
 		if !result.hasUpdate {
 			a.status.Set("Already up to date")
-		} else {
-			a.status.Set(fmt.Sprintf("Updated to %s (%s)", result.release.TagName, result.installPath))
+			a.goToChannelSelector()
+			return
 		}
-		a.goToChannelSelector()
+
+		a.status.Set(fmt.Sprintf("Updated to %s (%s)", result.release.TagName, result.installPath))
+		if err := update.StartUpdatedProcess(result.installPath); err != nil {
+			radio.Logf("ui.update.restart.error path=%q err=%v", result.installPath, err)
+			a.setTransientError(fmt.Sprintf("updated, but failed to restart: %v", err))
+			return
+		}
+		// On Windows the binary may be staged for post-exit replacement.
+		// Stop the app immediately so scheduled replacement can complete.
+		if a.ui != nil {
+			a.ui.Stop()
+		} else {
+			a.goToChannelSelector()
+		}
 	}
 }
 

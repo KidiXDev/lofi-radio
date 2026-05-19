@@ -330,19 +330,80 @@ func scheduleWindowsReplaceAfterExit(targetPath, stagedPath string, pid int) err
 		return nil
 	}
 
-	// Wait for current PID to disappear, then replace the executable.
-	// Retries help with short-lived AV/file-lock races.
-	command := fmt.Sprintf(`set "PID=%d" && set "SRC=%s" && set "DST=%s" && `+
-		`:wait && tasklist /FI "PID eq %%PID%%" | find "%%PID%%" >nul && (timeout /t 1 /nobreak >nul & goto wait) && `+
-		`for /L %%i in (1,1,30) do (move /Y "%%SRC%%" "%%DST%%" >nul 2>nul && exit /b 0 || timeout /t 1 /nobreak >nul)`,
-		pid,
-		stagedPath,
-		targetPath,
-	)
+	scriptFile, err := os.CreateTemp(os.TempDir(), "lofi-update-replace-*.bat")
+	if err != nil {
+		return fmt.Errorf("create update script: %w", err)
+	}
+	scriptPath := scriptFile.Name()
+	script := windowsReplaceScript(pid)
+	if _, err := scriptFile.WriteString(script); err != nil {
+		scriptFile.Close()
+		_ = os.Remove(scriptPath)
+		return fmt.Errorf("write update script: %w", err)
+	}
+	if err := scriptFile.Close(); err != nil {
+		_ = os.Remove(scriptPath)
+		return fmt.Errorf("close update script: %w", err)
+	}
 
-	cmd := exec.Command("cmd", "/C", command)
+	cmd := exec.Command("cmd", "/C", scriptPath)
+	cmd.Env = append(
+		os.Environ(),
+		"LOFI_REPLACE_SRC="+stagedPath,
+		"LOFI_REPLACE_DST="+targetPath,
+	)
 	if err := cmd.Start(); err != nil {
-		return err
+		_ = os.Remove(scriptPath)
+		return fmt.Errorf("start update script: %w", err)
+	}
+	return nil
+}
+
+func windowsReplaceScript(pid int) string {
+	pidValue := strconv.Itoa(pid)
+	return "@echo off\r\n" +
+		"setlocal\r\n" +
+		"set \"PID=" + pidValue + "\"\r\n" +
+		"set \"SRC=%LOFI_REPLACE_SRC%\"\r\n" +
+		"set \"DST=%LOFI_REPLACE_DST%\"\r\n" +
+		"set \"COUNT=0\"\r\n" +
+		":wait\r\n" +
+		"tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\r\n" +
+		"if not errorlevel 1 (\r\n" +
+		"  timeout /t 1 /nobreak >nul\r\n" +
+		"  goto wait\r\n" +
+		")\r\n" +
+		":retry\r\n" +
+		"move /Y \"%SRC%\" \"%DST%\" >nul 2>nul\r\n" +
+		"if not errorlevel 1 goto launch\r\n" +
+		"set /a COUNT+=1\r\n" +
+		"if %COUNT% GEQ 30 goto done\r\n" +
+		"timeout /t 1 /nobreak >nul\r\n" +
+		"goto retry\r\n" +
+		":launch\r\n" +
+		"if exist \"%DST%\" start \"\" \"%DST%\" >nul 2>nul\r\n" +
+		":done\r\n" +
+		"del \"%~f0\" >nul 2>nul\r\n" +
+		"endlocal\r\n"
+}
+
+func StartUpdatedProcess(executablePath string) error {
+	path := strings.TrimSpace(executablePath)
+	if path == "" {
+		return fmt.Errorf("empty executable path")
+	}
+
+	// On Windows, if a staged .new exists, replacement is deferred and the
+	// replacement script will launch the new executable after swapping files.
+	if runtime.GOOS == "windows" {
+		if _, err := os.Stat(path + ".new"); err == nil {
+			return nil
+		}
+	}
+
+	cmd := exec.Command(path)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start updated process: %w", err)
 	}
 	return nil
 }
