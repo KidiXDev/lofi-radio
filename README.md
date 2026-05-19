@@ -23,6 +23,7 @@ Planned channel roadmap:
 - [x] **Chillhop Music**
 - [x] **the bootleg boy**
 - [x] **STEEZYASFUCK**
+- [x] **Claude FM**
 - [ ] **The Jazz Hop Café**
 - [ ] **Homework Radio**
 - [ ] **Ambition**
@@ -45,6 +46,17 @@ Planned channel roadmap:
 
 ## 📦 Installation
 
+### One-line installer
+
+- Windows (PowerShell):
+  ```powershell
+  irm https://raw.githubusercontent.com/KidiXDev/lofi-radio/main/scripts/install.ps1 | iex
+  ```
+- Linux:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/KidiXDev/lofi-radio/main/scripts/install.sh | bash
+  ```
+
 ### Download from Releases
 
 1. Open the [Releases page](https://github.com/KidiXDev/lofi-radio/releases/latest).
@@ -56,16 +68,6 @@ Planned channel roadmap:
    - Linux: `lofi`
 4. Put it in a directory available in your `PATH`.
 
-### One-line installer
-
-- Windows (PowerShell):
-  ```powershell
-  irm https://raw.githubusercontent.com/KidiXDev/lofi-radio/main/scripts/install.ps1 | iex
-  ```
-- Linux:
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/KidiXDev/lofi-radio/main/scripts/install.sh | bash
-  ```
 
 Installer behavior:
 - Downloads the latest release for your OS/architecture.
