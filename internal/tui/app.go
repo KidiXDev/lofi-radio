@@ -60,7 +60,7 @@ type asyncResult struct {
 
 type app struct {
 	channelName        string
-	playlistURL        string
+	currentChannel     config.Channel
 	playingChannelURL  string
 	playingChannelName string
 	channels           []config.Channel
@@ -116,8 +116,8 @@ type app struct {
 
 const volumePersistDebounce = 600 * time.Millisecond
 
-func Run(channelName, playlistURL string, settings config.Settings, manager *config.Manager) error {
-	component := newApp(channelName, playlistURL, settings, manager)
+func Run(channel config.Channel, settings config.Settings, manager *config.Manager) error {
+	component := newApp(channel, settings, manager)
 
 	ui, err := gotui.NewApp(
 		gotui.WithRootComponent(component),
@@ -136,15 +136,15 @@ func Run(channelName, playlistURL string, settings config.Settings, manager *con
 	return component.exitErr
 }
 
-func newApp(channelName, playlistURL string, settings config.Settings, manager *config.Manager) *app {
+func newApp(channel config.Channel, settings config.Settings, manager *config.Manager) *app {
 	settings = config.NormalizeSettings(settings)
 	initialVolume := settings.Audio.Volume
 
 	component := &app{
-		channelName:   channelName,
-		playlistURL:   playlistURL,
-		channels:      config.Channels(),
-		configManager: manager,
+		channelName:    channel.Name,
+		currentChannel: channel,
+		channels:       config.Channels(),
+		configManager:  manager,
 
 		mode:       gotui.NewState(viewBoot),
 		status:     gotui.NewState("Checking dependencies"),
@@ -333,7 +333,11 @@ func (a *app) onAsyncResult(result asyncResult) {
 		if result.err != nil {
 			radio.Logf("ui.resolve.error err=%v", result.err)
 			radio.LogErrorDetails(result.err)
-			a.handleSwitchError(radio.UserMessage(result.err))
+			message := radio.UserMessage(result.err)
+			if a.removeCategoryIfProcessing(result.category, message) {
+				return
+			}
+			a.handleSwitchError(message)
 			return
 		}
 
@@ -372,7 +376,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 
 		now := time.Now()
 		a.currentCategory.Set(result.category)
-		a.playingChannelURL = a.playlistURL
+		a.playingChannelURL = a.currentChannel.ActiveURL()
 		a.playingChannelName = a.channelName
 		a.playing.Set(true)
 		a.paused.Set(false)
@@ -594,12 +598,12 @@ func (a *app) handleEnter(ke gotui.KeyEvent) {
 		channel := a.channels[idx]
 
 		// If this is already the current channel and we have categories, just go to selector
-		if channel.PlaylistURL == a.playlistURL && len(a.categories.Get()) > 0 {
+		if channel.ActiveURL() == a.currentChannel.ActiveURL() && len(a.categories.Get()) > 0 {
 			a.goToSelector("Select a category")
 			return
 		}
 
-		a.startFetchCategories(channel.Name, channel.PlaylistURL)
+		a.startFetchCategories(channel)
 
 	case viewUpdatePrompt:
 		choice := clamp(a.updateChoice.Get(), 0, 1)
@@ -784,7 +788,7 @@ func (a *app) goToChannelSelector() {
 	// Find current channel index to pre-select it
 	initialIdx := 0
 	for i, c := range a.channels {
-		if c.PlaylistURL == a.playlistURL {
+		if c.ActiveURL() == a.currentChannel.ActiveURL() {
 			initialIdx = i
 			break
 		}
@@ -822,6 +826,43 @@ func (a *app) handleSwitchError(message string) {
 	}
 
 	a.setTransientError(trimmed)
+}
+
+func (a *app) removeCategoryIfProcessing(category radio.Category, message string) bool {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	if !strings.Contains(msg, "processing this video") || !strings.Contains(msg, "check back later") {
+		return false
+	}
+
+	current := a.categories.Get()
+	if len(current) == 0 {
+		return false
+	}
+
+	filtered := make([]radio.Category, 0, len(current))
+	for _, item := range current {
+		if item.VideoURL == category.VideoURL {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+
+	if len(filtered) == len(current) {
+		return false
+	}
+
+	a.categories.Set(filtered)
+	if len(filtered) == 0 {
+		a.setTransientError("This channel has no available categories right now.")
+		return true
+	}
+
+	a.selected.Set(clamp(a.selected.Get(), 0, len(filtered)-1))
+	a.mode.Set(viewSelect)
+	a.status.Set("Removed unavailable category. Select another category.")
+	a.footerHint.Set(selectHint)
+	a.errMessage.Set("")
+	return true
 }
 
 func (a *app) setFatalError(err error, message string) {
@@ -909,11 +950,11 @@ func (a *app) skipUpdatePrompt() {
 	a.goToChannelSelector()
 }
 
-func (a *app) startFetchCategories(channelName, playlistURL string) {
-	a.channelName = channelName
-	a.playlistURL = playlistURL
+func (a *app) startFetchCategories(channel config.Channel) {
+	a.channelName = channel.Name
+	a.currentChannel = channel
 	a.mode.Set(viewBoot)
-	a.status.Set(fmt.Sprintf("Connecting to %s", channelName))
+	a.status.Set(fmt.Sprintf("Connecting to %s", channel.Name))
 
 	go func() {
 		defer func() {
@@ -923,9 +964,9 @@ func (a *app) startFetchCategories(channelName, playlistURL string) {
 			}
 		}()
 
-		categories, err := radio.FetchCategoriesFromPlaylist(playlistURL)
+		categories, err := a.fetchCategoriesByChannel(channel)
 		if err != nil {
-			radio.Logf("ui.fetch_categories.error channel=%s err=%v", channelName, err)
+			radio.Logf("ui.fetch_categories.error channel=%s err=%v", channel.Name, err)
 		}
 		a.emitResult(asyncResult{
 			kind:       asyncFetchCategories,
@@ -933,6 +974,32 @@ func (a *app) startFetchCategories(channelName, playlistURL string) {
 			err:        err,
 		})
 	}()
+}
+
+func (a *app) fetchCategoriesByChannel(channel config.Channel) ([]radio.Category, error) {
+	urlCount := 0
+	if channel.PlaylistURL != nil {
+		urlCount++
+	}
+	if channel.VideoURL != nil {
+		urlCount++
+	}
+	if channel.ChannelURL != nil {
+		urlCount++
+	}
+
+	if urlCount != 1 {
+		return nil, fmt.Errorf("channel %q must define exactly one of PlaylistURL, VideoURL, ChannelURL", channel.ID)
+	}
+
+	if channel.PlaylistURL != nil {
+		return radio.FetchCategoriesFromPlaylist(*channel.PlaylistURL)
+	}
+	if channel.VideoURL != nil {
+		return radio.FetchCategoryFromVideo(*channel.VideoURL)
+	}
+
+	return radio.FetchLiveCategoriesFromChannel(*channel.ChannelURL)
 }
 
 func (a *app) startResolve(category radio.Category) {
@@ -1497,7 +1564,7 @@ func (a *app) renderChannelSelector(termWidth, termHeight, contentHeight int) *g
 
 		for i := start; i < end; i++ {
 			channel := a.channels[i]
-			isCurrent := a.playing.Get() && channel.PlaylistURL == a.playingChannelURL
+			isCurrent := a.playing.Get() && channel.ActiveURL() == a.playingChannelURL
 			isSelected := i == selected
 
 			r := gotui.New(

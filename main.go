@@ -94,7 +94,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := tui.Run(selectedChannel.Name, selectedChannel.PlaylistURL, settings, configManager); err != nil {
+	if err := tui.Run(selectedChannel, settings, configManager); err != nil {
 		radio.Logf("main.error err=%v", err)
 		fmt.Println("Error:", err)
 		os.Exit(1)
