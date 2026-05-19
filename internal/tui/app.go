@@ -51,6 +51,7 @@ type asyncResult struct {
 	categories   []radio.Category
 	category     radio.Category
 	streamURL    string
+	statusNote   string
 	resolveToken int
 	release      update.ReleaseInfo
 	hasUpdate    bool
@@ -319,7 +320,11 @@ func (a *app) onAsyncResult(result asyncResult) {
 		a.selected.Set(0)
 		a.listOffset = 0
 		a.mode.Set(viewSelect)
-		a.status.Set("Select a category")
+		baseStatus := "Select a category"
+		if strings.TrimSpace(result.statusNote) != "" {
+			baseStatus = baseStatus + " (" + strings.TrimSpace(result.statusNote) + ")"
+		}
+		a.status.Set(baseStatus)
 		a.footerHint.Set(selectHint)
 		a.errMessage.Set("")
 		a.fatal = false
@@ -852,6 +857,10 @@ func (a *app) removeCategoryIfProcessing(category radio.Category, message string
 	}
 
 	a.categories.Set(filtered)
+	cacheKey := a.currentChannel.ID + "|" + a.currentChannel.ActiveURL()
+	if err := radio.WriteCategoryCache(cacheKey, filtered); err != nil {
+		radio.Logf("ui.cache.write.error channel=%s err=%v", a.currentChannel.ID, err)
+	}
 	if len(filtered) == 0 {
 		a.setTransientError("This channel has no available categories right now.")
 		return true
@@ -859,9 +868,9 @@ func (a *app) removeCategoryIfProcessing(category radio.Category, message string
 
 	a.selected.Set(clamp(a.selected.Get(), 0, len(filtered)-1))
 	a.mode.Set(viewSelect)
-	a.status.Set("Removed unavailable category. Select another category.")
+	a.status.Set("Category unavailable (still processing). It was removed from this list.")
 	a.footerHint.Set(selectHint)
-	a.errMessage.Set("")
+	a.errMessage.Set("The selected category is still being processed by YouTube and cannot be played yet.")
 	return true
 }
 
@@ -953,6 +962,22 @@ func (a *app) skipUpdatePrompt() {
 func (a *app) startFetchCategories(channel config.Channel) {
 	a.channelName = channel.Name
 	a.currentChannel = channel
+
+	cacheKey := channelCacheKey(channel)
+	cacheTTL := categoryCacheTTL(channel)
+	cacheLookup, cacheErr := radio.ReadCategoryCache(cacheKey, cacheTTL)
+	if cacheErr != nil {
+		radio.Logf("ui.cache.read.error channel=%s err=%v", channel.ID, cacheErr)
+	}
+	if cacheLookup.Found && cacheLookup.Fresh {
+		a.emitResult(asyncResult{
+			kind:       asyncFetchCategories,
+			categories: cacheLookup.Categories,
+			statusNote: "from cache",
+		})
+		return
+	}
+
 	a.mode.Set(viewBoot)
 	a.status.Set(fmt.Sprintf("Connecting to %s", channel.Name))
 
@@ -964,19 +989,20 @@ func (a *app) startFetchCategories(channel config.Channel) {
 			}
 		}()
 
-		categories, err := a.fetchCategoriesByChannel(channel)
+		categories, statusNote, err := a.fetchCategoriesByChannel(channel)
 		if err != nil {
 			radio.Logf("ui.fetch_categories.error channel=%s err=%v", channel.Name, err)
 		}
 		a.emitResult(asyncResult{
 			kind:       asyncFetchCategories,
 			categories: categories,
+			statusNote: statusNote,
 			err:        err,
 		})
 	}()
 }
 
-func (a *app) fetchCategoriesByChannel(channel config.Channel) ([]radio.Category, error) {
+func (a *app) fetchCategoriesByChannel(channel config.Channel) ([]radio.Category, string, error) {
 	urlCount := 0
 	if channel.PlaylistURL != nil {
 		urlCount++
@@ -989,17 +1015,63 @@ func (a *app) fetchCategoriesByChannel(channel config.Channel) ([]radio.Category
 	}
 
 	if urlCount != 1 {
-		return nil, fmt.Errorf("channel %q must define exactly one of PlaylistURL, VideoURL, ChannelURL", channel.ID)
+		return nil, "", fmt.Errorf("channel %q must define exactly one of PlaylistURL, VideoURL, ChannelURL", channel.ID)
 	}
 
+	cacheKey := channelCacheKey(channel)
+	cacheTTL := categoryCacheTTL(channel)
+	cacheLookup, cacheErr := radio.ReadCategoryCache(cacheKey, cacheTTL)
+	if cacheErr != nil {
+		radio.Logf("ui.cache.read.error channel=%s err=%v", channel.ID, cacheErr)
+	}
+	if cacheLookup.Found && cacheLookup.Fresh {
+		return cacheLookup.Categories, "from cache", nil
+	}
+
+	var (
+		categories []radio.Category
+		err        error
+	)
 	if channel.PlaylistURL != nil {
-		return radio.FetchCategoriesFromPlaylist(*channel.PlaylistURL)
+		categories, err = radio.FetchCategoriesFromPlaylist(*channel.PlaylistURL)
+	} else if channel.VideoURL != nil {
+		categories, err = radio.FetchCategoryFromVideo(*channel.VideoURL)
+	} else {
+		categories, err = radio.FetchLiveCategoriesFromChannel(*channel.ChannelURL)
 	}
-	if channel.VideoURL != nil {
-		return radio.FetchCategoryFromVideo(*channel.VideoURL)
+	if err != nil {
+		if cacheLookup.Found {
+			radio.Logf("ui.cache.fallback channel=%s reason=fetch_failed err=%v", channel.ID, err)
+			return cacheLookup.Categories, "stale cache (refresh failed)", nil
+		}
+		return nil, "", err
 	}
 
-	return radio.FetchLiveCategoriesFromChannel(*channel.ChannelURL)
+	if writeErr := radio.WriteCategoryCache(cacheKey, categories); writeErr != nil {
+		radio.Logf("ui.cache.write.error channel=%s err=%v", channel.ID, writeErr)
+	}
+
+	if cacheLookup.Found && !cacheLookup.Fresh {
+		return categories, "cache refreshed", nil
+	}
+	return categories, "", nil
+}
+
+func channelCacheKey(channel config.Channel) string {
+	return channel.ID + "|" + channel.ActiveURL()
+}
+
+func categoryCacheTTL(channel config.Channel) time.Duration {
+	if channel.ChannelURL != nil {
+		// Live channel tabs change quickly.
+		return 3 * time.Minute
+	}
+	if channel.PlaylistURL != nil {
+		// Playlists are moderately dynamic.
+		return 20 * time.Minute
+	}
+	// Single direct video metadata is mostly static.
+	return 24 * time.Hour
 }
 
 func (a *app) startResolve(category radio.Category) {
@@ -1729,6 +1801,15 @@ func (a *app) renderSelector(termWidth, termHeight, contentHeight int) *gotui.El
 		gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightWhite).Bold()),
 	))
 	right.AddChild(gotui.New(gotui.WithHR()))
+	if warning := strings.TrimSpace(a.errMessage.Get()); warning != "" {
+		right.AddChild(gotui.New(
+			gotui.WithText(" ! "+compactText(warning, 92)),
+			gotui.WithWrap(false),
+			gotui.WithTruncate(true),
+			gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.BrightYellow).Bold()),
+		))
+		right.AddChild(gotui.New(gotui.WithHR()))
+	}
 
 	if len(categories) == 0 {
 		right.AddChild(gotui.New(
