@@ -105,6 +105,9 @@ We are continuously working to make **Lofi Radio** the best terminal-based lofi 
 - [ ] **Auto Update**: Add support for auto updates.
 - [x] **Linux Support**: Add support for Linux.
 - [x] **Windows Support**: Add support for Windows.
+- [x] **Permissions Check**: Check write permissions in the executable directory.
+- [x] **Cache**: Add cache for categories for faster loading.
+- [x] **Self Uninstall**: Add support for self uninstall.
 - [ ] **MacOS Support**: Add support for MacOS.
 
 and more to come !
