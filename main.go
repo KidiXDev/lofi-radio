@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"github.com/kidixdev/lofi-radio/internal/config"
 	"github.com/kidixdev/lofi-radio/internal/radio"
 	"github.com/kidixdev/lofi-radio/internal/startup"
 	"github.com/kidixdev/lofi-radio/internal/tui"
+	"github.com/kidixdev/lofi-radio/internal/uninstall"
 	"github.com/kidixdev/lofi-radio/internal/update"
 	"github.com/kidixdev/lofi-radio/internal/version"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -19,6 +22,8 @@ func main() {
 	showVersion := flag.Bool("version", false, "print app version and exit")
 	runUpdate := flag.Bool("update", false, "download and install latest release")
 	updateInstallDir := flag.String("update-install-dir", "", "install directory for -update")
+	runUninstall := flag.Bool("uninstall", false, "uninstall this app")
+	assumeYes := flag.Bool("y", false, "skip confirmation for destructive operations")
 	flag.Parse()
 
 	if *showVersion {
@@ -39,6 +44,39 @@ func main() {
 		fmt.Printf("Updated to %s\n", release.TagName)
 		fmt.Printf("Installed binary: %s\n", executablePath)
 		fmt.Printf("Release page: %s\n", release.HTMLURL)
+		os.Exit(0)
+	}
+
+	if *runUninstall {
+		if !*assumeYes {
+			fmt.Print("This will uninstall lofi from the current executable location. Continue? [y/N]: ")
+			reader := bufio.NewReader(os.Stdin)
+			answer, _ := reader.ReadString('\n')
+			answer = strings.ToLower(strings.TrimSpace(answer))
+			if answer != "y" && answer != "yes" {
+				fmt.Println("Uninstall canceled.")
+				os.Exit(0)
+			}
+		}
+
+		result, err := uninstall.Run()
+		if err != nil {
+			fmt.Printf("Error: uninstall failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		if result.Deferred {
+			fmt.Printf("Uninstall scheduled.\n")
+			fmt.Printf("Executable will be removed after this process exits: %s\n", result.ExecutablePath)
+			fmt.Printf("Cache directory cleanup scheduled: %s\n", result.CacheDir)
+		} else {
+			fmt.Printf("Uninstall complete.\n")
+			fmt.Printf("Removed executable: %s\n", result.ExecutablePath)
+			fmt.Printf("Removed cache directory: %s\n", result.CacheDir)
+		}
+		if result.PathUpdated {
+			fmt.Printf("PATH references updated.\n")
+		}
 		os.Exit(0)
 	}
 
