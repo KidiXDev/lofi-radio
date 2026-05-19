@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/kidixdev/lofi-radio/internal/config"
 	"github.com/kidixdev/lofi-radio/internal/radio"
+	"github.com/kidixdev/lofi-radio/internal/startup"
 	"github.com/kidixdev/lofi-radio/internal/tui"
 	"github.com/kidixdev/lofi-radio/internal/update"
 	"github.com/kidixdev/lofi-radio/internal/version"
@@ -58,6 +59,14 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	if err := startup.CheckExecutableCachePermissions(); err != nil {
+		radio.Logf("main.startup.permission_check.error err=%v", err)
+		fmt.Printf("Error: cannot write cache in executable directory.\n")
+		fmt.Printf("Reason: %v\n", err)
+		fmt.Printf("Please move the app to a writable folder (for example inside your user directory) and run it again.\n")
+		os.Exit(1)
+	}
 
 	selectedChannel, err := config.ResolveChannel(*channelID)
 	if err != nil {
