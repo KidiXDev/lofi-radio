@@ -137,14 +137,14 @@ func NewPlayer(initialVolume int) *Player {
 	return p
 }
 
-func (p *Player) Play(streamURL string) error {
+func (p *Player) Play(streamURL string, reconnectOnInterrupt bool) error {
 	p.mu.Lock()
 	volume := p.volume
 	p.mu.Unlock()
-	return p.playWithVolume(streamURL, volume)
+	return p.playWithVolume(streamURL, volume, reconnectOnInterrupt)
 }
 
-func (p *Player) playWithVolume(streamURL string, volume int) error {
+func (p *Player) playWithVolume(streamURL string, volume int, reconnectOnInterrupt bool) error {
 	if err := p.fadeOutAndStop(420 * time.Millisecond); err != nil {
 		return err
 	}
@@ -216,6 +216,15 @@ func (p *Player) playWithVolume(streamURL string, volume int) error {
 			waitErr := currentCmd.Wait()
 			if isStopped(stopCh) {
 				waitCh <- nil
+				break
+			}
+			if !reconnectOnInterrupt {
+				if isNaturalPlaybackEnd(err, waitErr) {
+					writeLog("playback.completed")
+					waitCh <- nil
+				} else {
+					waitCh <- fmt.Errorf("playback interrupted: %w", firstNonNilErr(err, waitErr))
+				}
 				break
 			}
 
@@ -949,6 +958,16 @@ func firstNonNilErr(primary error, fallback error) error {
 		return primary
 	}
 	return fallback
+}
+
+func isNaturalPlaybackEnd(pipelineErr, waitErr error) bool {
+	if waitErr != nil {
+		return false
+	}
+	if pipelineErr == nil {
+		return true
+	}
+	return errors.Is(pipelineErr, io.EOF) || errors.Is(pipelineErr, io.ErrUnexpectedEOF)
 }
 
 func (p *Player) IsRunning() bool {

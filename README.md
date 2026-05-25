@@ -30,6 +30,7 @@ Planned channel roadmap:
 - [ ] **Dreamy**
 - [ ] **Lofi Geek**
 - [ ] **Chill with Taiki**
+- [x] **Intimate Vibes**
 
 ## 🚀 Getting Started
 

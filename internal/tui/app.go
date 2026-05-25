@@ -350,6 +350,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 
 		// Start playback off the UI loop; ffmpeg probe can block for seconds.
 		a.status.Set("Starting audio stream")
+		reconnectOnInterrupt := a.currentChannel.Type == config.ChannelTypeLive
 		go func(resolveToken int, st radio.Category, streamURL string) {
 			defer func() {
 				if recovered := recover(); recovered != nil {
@@ -362,7 +363,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 					})
 				}
 			}()
-			err := a.player.Play(streamURL)
+			err := a.player.Play(streamURL, reconnectOnInterrupt)
 			a.emitResult(asyncResult{
 				kind:         asyncPlay,
 				category:     st,
@@ -462,6 +463,9 @@ func (a *app) onTick() {
 			a.playing.Set(false)
 			a.paused.Set(false)
 			if !ok || err == nil {
+				if a.autoPlayNextCategory() {
+					return
+				}
 				a.setTransientError("playback stopped")
 			} else {
 				a.handleSwitchError("Playback failed. Please try another category.")
@@ -1018,6 +1022,10 @@ func (a *app) startFetchCategories(channel config.Channel) {
 }
 
 func (a *app) fetchCategoriesByChannel(channel config.Channel) ([]radio.Category, string, error) {
+	if channel.Type != config.ChannelTypeLive && channel.Type != config.ChannelTypeVideo {
+		return nil, "", fmt.Errorf("channel %q must define a valid type", channel.ID)
+	}
+
 	urlCount := 0
 	if channel.PlaylistURL != nil {
 		urlCount++
@@ -1047,12 +1055,22 @@ func (a *app) fetchCategoriesByChannel(channel config.Channel) ([]radio.Category
 		categories []radio.Category
 		err        error
 	)
-	if channel.PlaylistURL != nil {
-		categories, err = radio.FetchCategoriesFromPlaylist(*channel.PlaylistURL)
-	} else if channel.VideoURL != nil {
-		categories, err = radio.FetchCategoryFromVideo(*channel.VideoURL)
+	if channel.Type == config.ChannelTypeLive {
+		if channel.ChannelURL != nil {
+			categories, err = radio.FetchLiveCategoriesFromChannel(*channel.ChannelURL)
+		} else if channel.VideoURL != nil {
+			categories, err = radio.FetchCategoryFromVideo(*channel.VideoURL)
+		} else {
+			categories, err = radio.FetchCategoriesFromPlaylist(*channel.PlaylistURL)
+		}
 	} else {
-		categories, err = radio.FetchLiveCategoriesFromChannel(*channel.ChannelURL)
+		if channel.PlaylistURL != nil {
+			categories, err = radio.FetchCategoriesFromPlaylist(*channel.PlaylistURL)
+		} else if channel.VideoURL != nil {
+			categories, err = radio.FetchCategoryFromVideo(*channel.VideoURL)
+		} else {
+			categories, err = radio.FetchLiveCategoriesFromChannel(*channel.ChannelURL)
+		}
 	}
 	if err != nil {
 		if cacheLookup.Found {
@@ -1077,16 +1095,46 @@ func channelCacheKey(channel config.Channel) string {
 }
 
 func categoryCacheTTL(channel config.Channel) time.Duration {
-	if channel.ChannelURL != nil {
-		// Live channel tabs change quickly.
+	if channel.Type == config.ChannelTypeLive {
+		// Live channels and stream tabs change quickly.
 		return 3 * time.Minute
 	}
-	if channel.PlaylistURL != nil {
+	if channel.Type == config.ChannelTypeVideo && channel.PlaylistURL != nil {
 		// Playlists are moderately dynamic.
 		return 20 * time.Minute
 	}
 	// Single direct video metadata is mostly static.
 	return 24 * time.Hour
+}
+
+func (a *app) autoPlayNextCategory() bool {
+	if a.currentChannel.Type != config.ChannelTypeVideo {
+		return false
+	}
+
+	categories := a.categories.Get()
+	if len(categories) < 2 {
+		return false
+	}
+
+	currentURL := a.currentCategory.Get().VideoURL
+	currentIdx := -1
+	for i, category := range categories {
+		if category.VideoURL == currentURL {
+			currentIdx = i
+			break
+		}
+	}
+	if currentIdx < 0 {
+		currentIdx = clamp(a.selected.Get(), 0, len(categories)-1)
+	}
+
+	nextIdx := (currentIdx + 1) % len(categories)
+	nextCategory := categories[nextIdx]
+	a.selected.Set(nextIdx)
+	a.status.Set("Category finished. Playing next...")
+	a.startResolve(nextCategory)
+	return true
 }
 
 func (a *app) startResolve(category radio.Category) {
