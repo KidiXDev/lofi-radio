@@ -66,6 +66,12 @@ var channels = []Channel{
 		Type:        ChannelTypeVideo,
 		PlaylistURL: stringPtr("https://www.youtube.com/playlist?list=PLqyaDLGn3DXcMn6i18yr4fBoNz4tvMi6l"),
 	},
+	{
+		ID:       "ghibli-vibes",
+		Name:     "Ghibli Vibes",
+		Type:     ChannelTypeVideo,
+		VideoURL: stringPtr("https://www.youtube.com/watch?v=SpQ8-xiDYWI"),
+	},
 }
 
 func stringPtr(v string) *string {
