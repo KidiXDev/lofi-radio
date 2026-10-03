@@ -73,3 +73,34 @@ func TestStripPathLinesMissingProfile(t *testing.T) {
 		t.Fatalf("expected changed=false for missing profile")
 	}
 }
+
+func TestStripPathLinesKeepsSharedLines(t *testing.T) {
+	dir := t.TempDir()
+	profile := filepath.Join(dir, ".bashrc")
+	executableDir := "/opt/lofi/bin"
+	input := strings.Join([]string{
+		`export PATH="/opt/lofi/bin:$PATH"`,
+		`set -gx PATH "/opt/lofi/bin" $PATH`,
+		`export PATH="/opt/lofi/bin:/home/u/go/bin:$PATH"`,
+		`export PATH="/opt/lofi/bin-old:$PATH"`,
+	}, "\n")
+	if err := os.WriteFile(profile, []byte(input), 0o644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	if _, err := stripPathLines(profile, executableDir); err != nil {
+		t.Fatalf("stripPathLines returned error: %v", err)
+	}
+
+	out, err := os.ReadFile(profile)
+	if err != nil {
+		t.Fatalf("read profile: %v", err)
+	}
+	want := strings.Join([]string{
+		`export PATH="/opt/lofi/bin:/home/u/go/bin:$PATH"`,
+		`export PATH="/opt/lofi/bin-old:$PATH"`,
+	}, "\n")
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}

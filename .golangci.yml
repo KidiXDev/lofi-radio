@@ -1,0 +1,6 @@
+version: "2"
+linters:
+  exclusions:
+    # Keep v1's default: don't flag unchecked Close/Remove/print errors.
+    presets:
+      - std-error-handling

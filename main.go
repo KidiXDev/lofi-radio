@@ -68,11 +68,11 @@ func main() {
 		if result.Deferred {
 			fmt.Printf("Uninstall scheduled.\n")
 			fmt.Printf("Executable will be removed after this process exits: %s\n", result.ExecutablePath)
-			fmt.Printf("Cache directory cleanup scheduled: %s\n", result.CacheDir)
+			fmt.Printf("App data removed from: %s\n", result.AppDir)
 		} else {
 			fmt.Printf("Uninstall complete.\n")
 			fmt.Printf("Removed executable: %s\n", result.ExecutablePath)
-			fmt.Printf("Removed cache directory: %s\n", result.CacheDir)
+			fmt.Printf("Removed app data from: %s\n", result.AppDir)
 		}
 		if result.PathUpdated {
 			fmt.Printf("PATH references updated.\n")
