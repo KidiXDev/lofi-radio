@@ -47,16 +47,14 @@ type githubAsset struct {
 	URL  string `json:"browser_download_url"`
 }
 
+// DefaultInstallDir is where the running binary lives, so an update replaces the
+// copy on PATH instead of installing a second one elsewhere.
 func DefaultInstallDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	executablePath, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
+		return "", fmt.Errorf("resolve executable path: %w", err)
 	}
-
-	if runtime.GOOS == "windows" {
-		return filepath.Join(homeDir, "AppData", "Local", "lofi-radio", "bin"), nil
-	}
-	return filepath.Join(homeDir, ".local", "bin"), nil
+	return filepath.Dir(executablePath), nil
 }
 
 func CheckLatest(currentVersion string) (ReleaseInfo, bool, error) {
@@ -181,7 +179,7 @@ func selectAsset(assets []githubAsset) (Asset, error) {
 
 	for _, item := range assets {
 		if item.Name == target {
-			return Asset{Name: item.Name, URL: item.URL}, nil
+			return Asset(item), nil
 		}
 	}
 
@@ -195,7 +193,7 @@ func downloadAndInstall(asset Asset, installDir string) (string, error) {
 	}
 	request.Header.Set("User-Agent", "lofi-radio-updater")
 
-	client := &http.Client{Timeout: requestTimeout}
+	client := &http.Client{Timeout: downloadTimeout}
 	response, err := client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("download release asset: %w", err)

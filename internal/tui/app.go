@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,7 @@ const (
 
 type asyncResult struct {
 	kind         asyncKind
+	channel      config.Channel
 	categories   []radio.Category
 	category     radio.Category
 	streamURL    string
@@ -65,6 +67,7 @@ type app struct {
 	currentChannel     config.Channel
 	playingChannelURL  string
 	playingChannelName string
+	playingLive        bool
 	channels           []config.Channel
 	configManager      *config.Manager
 
@@ -77,6 +80,7 @@ type app struct {
 	bootEvent  *gotui.State[bootstrap.ProgressEvent]
 
 	player          *radio.Player
+	playMu          sync.Mutex // one Play at a time; also guards the stale-token stop
 	currentCategory *gotui.State[radio.Category]
 	volume          *gotui.State[int]
 	playing         *gotui.State[bool]
@@ -127,9 +131,10 @@ func Run(channel config.Channel, settings config.Settings, manager *config.Manag
 	if err != nil {
 		return err
 	}
-	defer ui.Close()
-	defer component.player.Stop()
+	// Deferred LIFO: restore the terminal first so a slow Stop() can't leave it in raw mode.
+	defer func() { _ = component.player.Stop() }()
 	defer component.flushPersistVolume()
+	defer ui.Close()
 
 	if err := ui.Run(); err != nil {
 		return err
@@ -318,6 +323,10 @@ func (a *app) onAsyncResult(result asyncResult) {
 			return
 		}
 
+		// Commit the channel only once its categories loaded, so a failed switch
+		// leaves the UI on the channel that is actually playing.
+		a.currentChannel = result.channel
+		a.channelName = result.channel.Name
 		a.categories.Set(result.categories)
 		a.selected.Set(0)
 		a.listOffset = 0
@@ -352,6 +361,8 @@ func (a *app) onAsyncResult(result asyncResult) {
 		a.status.Set("Starting audio stream")
 		reconnectOnInterrupt := a.currentChannel.Type == config.ChannelTypeLive
 		go func(resolveToken int, st radio.Category, streamURL string) {
+			a.playMu.Lock()
+			defer a.playMu.Unlock()
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					radio.Logf("ui.play.panic category=%q recovered=%v", st.Title, recovered)
@@ -363,7 +374,16 @@ func (a *app) onAsyncResult(result asyncResult) {
 					})
 				}
 			}()
+			if resolveToken != a.resolveToken.Get() {
+				return // superseded while waiting for the previous Play
+			}
 			err := a.player.Play(streamURL, reconnectOnInterrupt)
+			if err == nil && resolveToken != a.resolveToken.Get() {
+				// Cancelled or superseded while connecting: don't leave ghost audio.
+				// ponytail: an Esc landing between emit and the UI reading this result
+				// still slips through; tag results with a player session id if it matters.
+				_ = a.player.Stop()
+			}
 			a.emitResult(asyncResult{
 				kind:         asyncPlay,
 				category:     st,
@@ -373,6 +393,11 @@ func (a *app) onAsyncResult(result asyncResult) {
 		}(result.resolveToken, result.category, result.streamURL)
 
 	case asyncPlay:
+		// Any Play attempt stops the previous session first, so stop claiming it plays.
+		if !a.player.IsRunning() {
+			a.playing.Set(false)
+			a.paused.Set(false)
+		}
 		if result.resolveToken != a.resolveToken.Get() {
 			return
 		}
@@ -386,6 +411,7 @@ func (a *app) onAsyncResult(result asyncResult) {
 		a.currentCategory.Set(result.category)
 		a.playingChannelURL = a.currentChannel.ActiveURL()
 		a.playingChannelName = a.channelName
+		a.playingLive = a.currentChannel.Type == config.ChannelTypeLive
 		a.playing.Set(true)
 		a.paused.Set(false)
 		a.playStartedAt.Set(now)
@@ -421,6 +447,13 @@ func (a *app) onAsyncResult(result asyncResult) {
 			return
 		}
 
+		if runtime.GOOS != "windows" {
+			// The binary was replaced in place; a child spawned from here would have
+			// no terminal, so ask for a manual restart instead.
+			a.goToChannelSelector()
+			a.status.Set(fmt.Sprintf("Updated to %s. Restart lofi to use it.", result.release.TagName))
+			return
+		}
 		a.status.Set(fmt.Sprintf("Updated to %s (%s)", result.release.TagName, result.installPath))
 		if err := update.StartUpdatedProcess(result.installPath); err != nil {
 			radio.Logf("ui.update.restart.error path=%q err=%v", result.installPath, err)
@@ -456,6 +489,10 @@ func (a *app) onTick() {
 		return
 	}
 
+	// Read liveness before draining waitCh: a session posts its result before it
+	// reports not-running, so a finished session always has its result waiting here.
+	running := a.player.IsRunning()
+
 	// Consume playback completion/error signal to surface real failures.
 	if waitCh := a.player.WaitChan(); waitCh != nil {
 		select {
@@ -467,6 +504,9 @@ func (a *app) onTick() {
 					return
 				}
 				a.setTransientError("playback stopped")
+			} else if a.playingLive {
+				// Live stream URLs expire after a few hours; re-resolve instead of giving up.
+				a.startResolve(a.currentCategory.Get())
 			} else {
 				a.handleSwitchError("Playback failed. Please try another category.")
 			}
@@ -475,7 +515,7 @@ func (a *app) onTick() {
 		}
 	}
 
-	if !a.player.IsRunning() {
+	if !running {
 		a.playing.Set(false)
 		a.paused.Set(false)
 		a.setTransientError("playback stopped")
@@ -979,9 +1019,6 @@ func (a *app) skipUpdatePrompt() {
 }
 
 func (a *app) startFetchCategories(channel config.Channel) {
-	a.channelName = channel.Name
-	a.currentChannel = channel
-
 	cacheKey := channelCacheKey(channel)
 	cacheTTL := categoryCacheTTL(channel)
 	cacheLookup, cacheErr := radio.ReadCategoryCache(cacheKey, cacheTTL)
@@ -991,6 +1028,7 @@ func (a *app) startFetchCategories(channel config.Channel) {
 	if cacheLookup.Found && cacheLookup.Fresh {
 		a.emitResult(asyncResult{
 			kind:       asyncFetchCategories,
+			channel:    channel,
 			categories: cacheLookup.Categories,
 			statusNote: "from cache",
 		})
@@ -1014,6 +1052,7 @@ func (a *app) startFetchCategories(channel config.Channel) {
 		}
 		a.emitResult(asyncResult{
 			kind:       asyncFetchCategories,
+			channel:    channel,
 			categories: categories,
 			statusNote: statusNote,
 			err:        err,
@@ -2763,63 +2802,6 @@ func (a *app) buildWaveVisualizer(paused bool, termWidth, rows int) *gotui.Eleme
 	return col
 }
 
-func (a *app) buildVisualizerDecor(paused bool, termWidth int) *gotui.Element {
-	phase := a.pulsePhase.Get()
-	rows := 5
-	if termWidth < 110 {
-		rows = 4
-	}
-	cols := 34
-	if termWidth >= 150 {
-		cols = 42
-	} else if termWidth < 115 {
-		cols = 28
-	}
-
-	box := gotui.New(
-		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
-		gotui.WithFlexGrow(1),
-		gotui.WithJustify(gotui.JustifyCenter),
-		gotui.WithGap(0),
-	)
-
-	for r := 0; r < rows; r++ {
-		line := gotui.New(
-			gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Row),
-			gotui.WithGap(0),
-		)
-		rowFrac := float64(r) / float64(max(rows-1, 1))
-		for c := 0; c < cols; c++ {
-			x := float64(c) / float64(max(cols-1, 1))
-			// More complex wave for the background
-			w := 0.5 + 0.4*math.Sin(phase*1.4+x*9.0-rowFrac*2.3) + 0.1*math.Sin(phase*3.1-x*4.5)
-
-			ch := "·"
-			if w > 0.85 {
-				ch = "•"
-			}
-			if paused && w > 0.92 {
-				ch = "◦"
-			}
-
-			// Pulsing colors: Deep Navy to Soft Teal/Violet
-			hue := 240 + 40*math.Sin(phase*0.5) + 20*rowFrac + 20*w
-			sat := 0.30 + 0.20*w
-			lit := 0.10 + 0.10*w
-
-			r8, g8, b8 := hslToRGB(hue, sat, lit)
-			line.AddChild(gotui.New(
-				gotui.WithText(ch),
-				gotui.WithFlexGrow(1),
-				gotui.WithTextStyle(gotui.NewStyle().Foreground(gotui.RGBColor(r8, g8, b8))),
-			))
-		}
-		box.AddChild(line)
-	}
-
-	return box
-}
-
 func (a *app) renderError() *gotui.Element {
 	box := gotui.New(
 		gotui.WithDisplay(gotui.DisplayFlex), gotui.WithDirection(gotui.Column),
@@ -2956,25 +2938,6 @@ func (a *app) playbackElapsed() string {
 	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }
 
-func renderBar(current, total int64, width int) string {
-	if width < 4 {
-		width = 4
-	}
-
-	if total <= 0 {
-		total = current
-		if total <= 0 {
-			total = 1
-		}
-	}
-
-	current = clamp64(current, 0, total)
-	filled := int((float64(current) / float64(total)) * float64(width))
-	filled = clamp(filled, 0, width)
-
-	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
-}
-
 func humanBytes(size int64) string {
 	if size < 1024 {
 		return fmt.Sprintf("%d B", size)
@@ -3001,22 +2964,6 @@ func humanSpeed(speedBytes float64) string {
 	return humanBytes(int64(speedBytes)) + "/s"
 }
 
-func humanDuration(d time.Duration) string {
-	if d <= 0 {
-		return "--:--"
-	}
-
-	totalSeconds := int(d.Seconds())
-	minutes := totalSeconds / 60
-	seconds := totalSeconds % 60
-	hours := minutes / 60
-	minutes = minutes % 60
-	if hours > 0 {
-		return fmt.Sprintf("%dh %02dm", hours, minutes)
-	}
-	return fmt.Sprintf("%02d:%02d", minutes, seconds)
-}
-
 func signalAndBitrate(stats radio.PlaybackStats) (int, string) {
 	if !stats.Running {
 		return 1, "0KBPS"
@@ -3041,14 +2988,15 @@ func signalAndBitrate(stats radio.PlaybackStats) (int, string) {
 
 func compactText(value string, maxLen int) string {
 	clean := strings.TrimSpace(strings.ReplaceAll(value, "\n", " "))
-	if maxLen <= 0 || len(clean) <= maxLen {
+	runes := []rune(clean) // count characters, not bytes, so emoji/CJK aren't split
+	if maxLen <= 0 || len(runes) <= maxLen {
 		return clean
 	}
 
 	if maxLen <= 3 {
-		return clean[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return clean[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }
 
 func pingPongScrollText(value string, maxLen int, tick int) string {

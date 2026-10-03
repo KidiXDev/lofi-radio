@@ -34,6 +34,9 @@ var downloadHTTPClient = &http.Client{
 
 var errBinDirFound = errors.New("bin-dir-found")
 
+// YouTube breaks old yt-dlp releases within weeks, so the cached copy is refreshed.
+const ytDlpMaxAge = 7 * 24 * time.Hour
+
 type BinaryPaths struct {
 	YtDlp  string
 	FFmpeg string
@@ -70,7 +73,8 @@ func resolveYtDlpPath(reporter ProgressReporter) (string, error) {
 	}
 
 	localPath := config.YtDlpPath()
-	if ensureRunnableFile(localPath) {
+	haveLocal := ensureRunnableFile(localPath)
+	if haveLocal && !isOlderThan(localPath, ytDlpMaxAge) {
 		emitStatus(reporter, "yt-dlp", "Using local cached binary")
 		return localPath, nil
 	}
@@ -82,6 +86,9 @@ func resolveYtDlpPath(reporter ProgressReporter) (string, error) {
 
 	emitStatus(reporter, "yt-dlp", "Downloading binary")
 	if err := downloadBinary(downloadURL, localPath, "yt-dlp", reporter); err != nil {
+		if haveLocal {
+			return localPath, nil // a stale copy beats none, e.g. when offline
+		}
 		return "", fmt.Errorf("ensure yt-dlp binary: %w", err)
 	}
 
@@ -562,6 +569,11 @@ func ensureRunnableFile(path string) bool {
 	return refreshedInfo.Mode()&0o111 != 0
 }
 
+func isOlderThan(path string, maxAge time.Duration) bool {
+	info, err := os.Stat(path)
+	return err != nil || time.Since(info.ModTime()) > maxAge
+}
+
 func emitStatus(reporter ProgressReporter, component, message string) {
 	if reporter == nil {
 		return
@@ -584,12 +596,4 @@ func emitDownload(reporter ProgressReporter, component string, progress Download
 		Component: component,
 		Download:  progress,
 	})
-}
-
-func ffmpegFileName() string {
-	if runtime.GOOS == "windows" {
-		return "ffmpeg.exe"
-	}
-
-	return "ffmpeg"
 }

@@ -30,12 +30,7 @@ func NewManager(path string, serializer Serializer) (*Manager, error) {
 }
 
 func NewDefaultManager() (*Manager, error) {
-	workingDir, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("resolve working directory: %w", err)
-	}
-	configPath := filepath.Join(workingDir, defaultConfigFileName)
-	return NewManager(configPath, YAMLSerializer{})
+	return NewManager(filepath.Join(AppDir(), defaultConfigFileName), YAMLSerializer{})
 }
 
 func (m *Manager) Load() (Settings, error) {

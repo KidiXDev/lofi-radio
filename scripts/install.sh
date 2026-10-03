@@ -46,11 +46,26 @@ case ":${PATH}:" in
   *":${install_dir}:"*)
     ;;
   *)
-    shell_rc="${HOME}/.bashrc"
-    if [ -n "${ZSH_VERSION:-}" ]; then
-      shell_rc="${HOME}/.zshrc"
+    # This script runs under bash (curl | bash), so detect the user's shell via $SHELL.
+    # Keep these lines in sync with shouldStripPathLine in internal/uninstall.
+    case "${SHELL:-}" in
+      */zsh)
+        shell_rc="${HOME}/.zshrc"
+        path_line="export PATH=\"${install_dir}:\$PATH\""
+        ;;
+      */fish)
+        shell_rc="${HOME}/.config/fish/config.fish"
+        path_line="set -gx PATH \"${install_dir}\" \$PATH"
+        ;;
+      *)
+        shell_rc="${HOME}/.bashrc"
+        path_line="export PATH=\"${install_dir}:\$PATH\""
+        ;;
+    esac
+    mkdir -p "$(dirname "$shell_rc")"
+    if ! grep -qxF "$path_line" "$shell_rc" 2>/dev/null; then
+      printf '\n%s\n' "$path_line" >> "$shell_rc"
     fi
-    printf '\nexport PATH="%s:$PATH"\n' "$install_dir" >> "$shell_rc"
     echo "Added $install_dir to PATH in $shell_rc"
     ;;
 esac

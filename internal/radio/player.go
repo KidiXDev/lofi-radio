@@ -22,6 +22,7 @@ import (
 )
 
 var errPlayerNotRunning = errors.New("player is not running")
+var errPlaybackStopped = errors.New("playback stopped")
 var preferredPCMProfile atomic.Value // string
 
 type pcmProfile struct {
@@ -94,6 +95,7 @@ type Player struct {
 	volume    int
 	streamURL string
 	stopCh    chan struct{}
+	done      chan struct{} // closed when the playback goroutine exits
 
 	audioCtx     *oto.Context
 	audioPlayer  PCMPlayer
@@ -161,13 +163,25 @@ func (p *Player) playWithVolume(streamURL string, volume int, reconnectOnInterru
 		writeLog("playback.connecting volume=%d", volume)
 	}
 
-	ctx, err := oto.NewContext(pcmSampleRate, pcmChannels, pcmBitDepthBytes, pcmChunkBytes*4)
-	if err != nil {
-		return fmt.Errorf("create audio context: %w", err)
+	// oto v1 allows one context per process and its Close() is a use-after-free
+	// (its pump goroutine writes to and re-closes the freed ALSA handle), so open
+	// it once and keep it for the process lifetime; sessions only add/remove players.
+	p.mu.Lock()
+	ctx := p.audioCtx
+	p.mu.Unlock()
+	if ctx == nil {
+		var err error
+		ctx, err = oto.NewContext(pcmSampleRate, pcmChannels, pcmBitDepthBytes, pcmChunkBytes*4)
+		if err != nil {
+			return fmt.Errorf("create audio context: %w", err)
+		}
+		p.mu.Lock()
+		p.audioCtx = ctx
+		p.mu.Unlock()
 	}
 
 	connectStartedAt := time.Now()
-	ffmpeg, stdout, ffmpegStderr, profileName, err := startPCMFFmpegWithFallback(streamURL, false)
+	ffmpeg, stdout, ffmpegStderr, profileName, err := startPCMFFmpegWithFallback(streamURL, false, nil)
 	if err != nil {
 		writeLog("playback.connect_failed err=%v", err)
 		return err
@@ -181,14 +195,32 @@ func (p *Player) playWithVolume(streamURL string, volume int, reconnectOnInterru
 	audioOnce := &sync.Once{}
 	waitCh := make(chan error, 1)
 	stopCh := make(chan struct{})
+	done := make(chan struct{})
 	atomic.StoreInt32(&p.pauseFlag, 0)
 	p.fadePermille.Store(0)
 
+	// Publish the session before the goroutine can touch it.
+	p.mu.Lock()
+	p.cmd = ffmpeg
+	p.waitCh = waitCh
+	p.streamURL = streamURL
+	p.stopCh = stopCh
+	p.done = done
+	p.audioPlayer = audioPlayer
+	p.audioOnce = audioOnce
+	p.ffmpegStderr = ffmpegStderr
+	p.mu.Unlock()
+
 	go func() {
+		defer close(done)
+		defer close(waitCh)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				writeLog("playback.panic recovered=%v", recovered)
-				waitCh <- fmt.Errorf("playback panic: %v", recovered)
+				select {
+				case waitCh <- fmt.Errorf("playback panic: %v", recovered):
+				default:
+				}
 			}
 		}()
 		p.Viz.active.Store(1)
@@ -197,11 +229,10 @@ func (p *Player) playWithVolume(streamURL string, volume int, reconnectOnInterru
 
 		currentCmd := ffmpeg
 		currentStream := stdout
-		currentStderr := ffmpegStderr
 		restarts := 0
 
 		for {
-			if isStopped(stopCh) {
+			if isClosed(stopCh) {
 				if currentCmd != nil && currentCmd.Process != nil {
 					_ = currentCmd.Process.Kill()
 				}
@@ -212,9 +243,9 @@ func (p *Player) playWithVolume(streamURL string, volume int, reconnectOnInterru
 				break
 			}
 
-			err := p.runPCMPipeline(currentStream, audioPlayer)
+			err := p.runPCMPipeline(currentStream, audioPlayer, !reconnectOnInterrupt)
 			waitErr := currentCmd.Wait()
-			if isStopped(stopCh) {
+			if isClosed(stopCh) {
 				waitCh <- nil
 				break
 			}
@@ -235,47 +266,42 @@ func (p *Player) playWithVolume(streamURL string, volume int, reconnectOnInterru
 			p.lastReconnect.Store(time.Now().UnixNano())
 			writeLog("playback.interrupted attempt=%d err=%v", restarts, firstNonNilErr(err, waitErr))
 			restartStartedAt := time.Now()
-			time.Sleep(450 * time.Millisecond)
+			select {
+			case <-stopCh:
+				continue // loop top handles the stop
+			case <-time.After(450 * time.Millisecond):
+			}
 
-			nextCmd, nextStream, nextStderr, profileName, startErr := startPCMFFmpegWithFallback(streamURL, true)
+			nextCmd, nextStream, nextStderr, profileName, startErr := startPCMFFmpegWithFallback(streamURL, true, stopCh)
 			if startErr != nil {
+				if isClosed(stopCh) {
+					waitCh <- nil
+					break
+				}
 				writeLog("playback.reconnect_failed attempt=%d err=%v", restarts, startErr)
-				waitCh <- fmt.Errorf("restart stream failed after %d attempts: %w", restarts, startErr)
+				waitCh <- fmt.Errorf("restart stream failed (interruption %d): %w", restarts, startErr)
 				break
 			}
 			writeLog("playback.resumed attempt=%d profile=%q downtime_ms=%d", restarts, profileName, time.Since(restartStartedAt).Milliseconds())
 
 			p.mu.Lock()
-			p.cmd = nextCmd
-			p.ffmpegStderr = nextStderr
+			if p.stopCh == stopCh { // don't resurrect state after Stop()
+				p.cmd = nextCmd
+				p.ffmpegStderr = nextStderr
+			}
 			p.mu.Unlock()
 
 			currentCmd = nextCmd
 			currentStream = nextStream
-			currentStderr = nextStderr
-			_ = currentStderr
 		}
-		close(waitCh)
 	}()
-
-	p.mu.Lock()
-	p.cmd = ffmpeg
-	p.waitCh = waitCh
-	p.volume = clampVolume(volume)
-	p.streamURL = streamURL
-	p.stopCh = stopCh
-	p.audioCtx = ctx
-	p.audioPlayer = audioPlayer
-	p.audioOnce = audioOnce
-	p.ffmpegStderr = ffmpegStderr
-	p.mu.Unlock()
 
 	go p.fadeIn(320 * time.Millisecond)
 
 	return nil
 }
 
-func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool) (*exec.Cmd, io.Reader, *bytes.Buffer, string, error) {
+func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool, stop <-chan struct{}) (*exec.Cmd, io.Reader, *bytes.Buffer, string, error) {
 	profiles := []pcmProfile{
 		{name: "reconnect", withReconnect: true},
 		{name: "plain", withReconnect: false},
@@ -295,6 +321,9 @@ func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool) (*exec.C
 
 	var lastErr error
 	for _, profile := range profiles {
+		if isClosed(stop) {
+			return nil, nil, nil, "", errPlaybackStopped
+		}
 		ffmpeg, stdout, stderrBuf, err := startPCMFFmpeg(streamURL, profile.withReconnect)
 		if err != nil {
 			lastErr = err
@@ -302,7 +331,7 @@ func startPCMFFmpegWithFallback(streamURL string, preferReconnect bool) (*exec.C
 		}
 
 		// Probe first PCM bytes so we don't keep a "running" process that never emits audio.
-		probeBytes, probeErr := readFirstPCMChunk(stdout, ffmpeg, 8*time.Second)
+		probeBytes, probeErr := readFirstPCMChunk(stdout, ffmpeg, 8*time.Second, stop)
 		if probeErr != nil {
 			lastErr = probeErr
 			continue
@@ -339,7 +368,7 @@ func prioritizeProfiles(profiles []pcmProfile, preferred string) []pcmProfile {
 	return out
 }
 
-func readFirstPCMChunk(stdout io.ReadCloser, ffmpeg *exec.Cmd, timeout time.Duration) ([]byte, error) {
+func readFirstPCMChunk(stdout io.ReadCloser, ffmpeg *exec.Cmd, timeout time.Duration, stop <-chan struct{}) ([]byte, error) {
 	type probeResult struct {
 		data []byte
 		err  error
@@ -391,6 +420,12 @@ func readFirstPCMChunk(stdout io.ReadCloser, ffmpeg *exec.Cmd, timeout time.Dura
 		}
 		_ = ffmpeg.Wait()
 		return nil, fmt.Errorf("no PCM received within %s", timeout)
+	case <-stop:
+		if ffmpeg.Process != nil {
+			_ = ffmpeg.Process.Kill()
+		}
+		_ = ffmpeg.Wait()
+		return nil, errPlaybackStopped
 	}
 }
 
@@ -435,7 +470,8 @@ func startPCMFFmpeg(streamURL string, withReconnect bool) (*exec.Cmd, io.ReadClo
 	return ffmpeg, stdout, stderr, nil
 }
 
-func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
+// holdOnPause stops consuming the stream while paused (VOD) instead of muting it (live).
+func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer, holdOnPause bool) error {
 	const (
 		bytesPerSample = pcmBitDepthBytes
 		minFreqHz      = 32.0
@@ -454,22 +490,26 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 
 	go func() {
 		defer close(packetCh)
+		// Forward whole stereo frames only and carry any partial frame into the
+		// next read, so an odd-sized read can't byte-shift every later sample.
+		const frameBytes = pcmBitDepthBytes * pcmChannels
 		rawBuf := make([]byte, pcmChunkBytes)
+		pending := 0
 		for {
-			n, err := io.ReadAtLeast(r, rawBuf, bytesPerSample)
-			if rem := n % bytesPerSample; rem != 0 {
-				n -= rem
-			}
+			n, err := io.ReadAtLeast(r, rawBuf[pending:], 1)
+			n += pending
+			whole := n - n%frameBytes
 
-			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, rawBuf[:n])
+			if whole > 0 {
+				chunk := make([]byte, whole)
+				copy(chunk, rawBuf[:whole])
 				select {
 				case packetCh <- pcmPacket{data: chunk}:
 				case <-done:
 					return
 				}
 			}
+			pending = copy(rawBuf, rawBuf[whole:n])
 
 			if err != nil {
 				select {
@@ -506,6 +546,13 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 			continue
 		}
 
+		// ponytail: a long VOD pause may let the server drop the connection, ending
+		// playback on resume; restart ffmpeg with -ss at the paused offset if that bites.
+		// Stop() clears pauseFlag, so this never outlives the session.
+		for holdOnPause && atomic.LoadInt32(&p.pauseFlag) == 1 {
+			time.Sleep(50 * time.Millisecond)
+		}
+
 		chunk := packet.data
 		n := len(chunk)
 		if n == 0 {
@@ -533,10 +580,8 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 		for i := range samplesFound {
 			base := i * bytesPerSample
 			sample := int16(binary.LittleEndian.Uint16(chunk[base:]))
-			audioSample := sample
-			if isPaused {
-				audioSample = 0
-			} else {
+			var audioSample int16 // silence while paused
+			if !isPaused {
 				audioSample = int16(float64(sample) * volScale)
 			}
 			binary.LittleEndian.PutUint16(playBuf[base:], uint16(audioSample))
@@ -550,18 +595,14 @@ func (p *Player) runPCMPipeline(r io.Reader, audioOut PCMPlayer) error {
 					fftPos = 0
 					spec := fftMagnitudes(fftIn, window)
 					bands := bandEnergies(spec, bandRanges)
-					linMean := 0.0
 					linVals := make([]float64, NumBands)
 					for b := 0; b < NumBands; b++ {
 						db := 20.0 * math.Log10(1e-9+bands[b])
 						if db < -90 {
 							db = -90
 						}
-						lin := (db + 90) / 90
-						linVals[b] = lin
-						linMean += lin
+						linVals[b] = (db + 90) / 90
 					}
-					linMean /= float64(NumBands)
 
 					frameVals := make([]float64, NumBands)
 					frameMax := 0.0
@@ -845,15 +886,14 @@ func (p *Player) Stop() error {
 	p.waitCh = nil
 	p.streamURL = ""
 	p.stopCh = nil
+	p.done = nil
 	atomic.StoreInt32(&p.pauseFlag, 0)
 	player := p.audioPlayer
 	p.audioPlayer = nil
 	audioOnce := p.audioOnce
 	p.audioOnce = nil
-	ctx := p.audioCtx
-	p.audioCtx = nil
 	p.ffmpegStderr = nil
-	p.fadePermille.Store(1000)
+	p.fadePermille.Store(0) // drain the queued PCM silently; the next session fades in
 	p.mu.Unlock()
 	if stopCh != nil {
 		close(stopCh)
@@ -866,9 +906,6 @@ func (p *Player) Stop() error {
 			} else {
 				_ = player.Close()
 			}
-		}
-		if ctx != nil {
-			_ = ctx.Close()
 		}
 		p.Viz.set([NumBands]float64{})
 		return nil
@@ -887,9 +924,6 @@ func (p *Player) Stop() error {
 		} else {
 			_ = player.Close()
 		}
-	}
-	if ctx != nil {
-		_ = ctx.Close()
 	}
 	p.Viz.set([NumBands]float64{})
 	writeLog("playback.stopped")
@@ -972,16 +1006,13 @@ func isNaturalPlaybackEnd(pipelineErr, waitErr error) bool {
 	return errors.Is(pipelineErr, io.EOF) || errors.Is(pipelineErr, io.ErrUnexpectedEOF)
 }
 
+// IsRunning reports whether a playback session is alive. It stays true while a
+// live stream reconnects, even though the old ffmpeg process has exited.
 func (p *Player) IsRunning() bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.cmd == nil {
-		return false
-	}
-	if p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
-		return false
-	}
-	return true
+	done := p.done
+	p.mu.Unlock()
+	return done != nil && !isClosed(done)
 }
 
 func (p *Player) WaitChan() <-chan error {
@@ -990,12 +1021,12 @@ func (p *Player) WaitChan() <-chan error {
 	return p.waitCh
 }
 
-func isStopped(stopCh <-chan struct{}) bool {
-	if stopCh == nil {
+func isClosed(ch <-chan struct{}) bool {
+	if ch == nil {
 		return false
 	}
 	select {
-	case <-stopCh:
+	case <-ch:
 		return true
 	default:
 		return false

@@ -8,11 +8,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/kidixdev/lofi-radio/internal/config"
 )
 
 type Result struct {
 	ExecutablePath string
-	CacheDir       string
+	AppDir         string
 	Deferred       bool
 	PathUpdated    bool
 }
@@ -24,16 +26,18 @@ func Run() (Result, error) {
 	}
 
 	executableDir := filepath.Dir(executablePath)
-	cacheDir := filepath.Join(executableDir, ".cache")
 	pathUpdated := removePathReference(executableDir)
+	if err := removeAppData(executableDir); err != nil {
+		return Result{}, err
+	}
 
 	if runtime.GOOS == "windows" {
-		if err := scheduleWindowsUninstall(executablePath, cacheDir, os.Getpid()); err != nil {
+		if err := scheduleWindowsUninstall(executablePath, executableDir, os.Getpid()); err != nil {
 			return Result{}, err
 		}
 		return Result{
 			ExecutablePath: executablePath,
-			CacheDir:       cacheDir,
+			AppDir:         executableDir,
 			Deferred:       true,
 			PathUpdated:    pathUpdated,
 		}, nil
@@ -42,19 +46,47 @@ func Run() (Result, error) {
 	if err := os.Remove(executablePath); err != nil && !os.IsNotExist(err) {
 		return Result{}, fmt.Errorf("remove executable %q: %w", executablePath, err)
 	}
-	if err := os.RemoveAll(cacheDir); err != nil {
-		return Result{}, fmt.Errorf("remove cache directory %q: %w", cacheDir, err)
-	}
+	_ = os.Remove(executableDir) // only succeeds when it was a dedicated, now empty, install dir
 
 	return Result{
 		ExecutablePath: executablePath,
-		CacheDir:       cacheDir,
+		AppDir:         executableDir,
 		Deferred:       false,
 		PathUpdated:    pathUpdated,
 	}, nil
 }
 
-func scheduleWindowsUninstall(executablePath, cacheDir string, pid int) error {
+// removeAppData deletes only what the app creates next to its binary. The binary
+// may live in $HOME or a shared bin dir, so whole directories are never wiped.
+func removeAppData(dir string) error {
+	owned := []string{
+		filepath.Join(dir, ".cache", "categories"),
+		filepath.Join(dir, ".cache", "permission-check"),
+		config.YtDlpPath(),
+		config.YtDlpPath() + ".download",
+		filepath.Dir(config.FFmpegPath()),
+		filepath.Join(dir, "config.yaml"),
+		filepath.Join(dir, "config.yaml.tmp"),
+		filepath.Join(dir, "logger.log"),
+	}
+	for _, path := range owned {
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("remove %q: %w", path, err)
+		}
+	}
+	// Drop parents only if that left them empty; os.Remove refuses non-empty dirs.
+	for _, path := range []string{
+		filepath.Dir(config.YtDlpPath()),
+		filepath.Dir(filepath.Dir(config.FFmpegPath())),
+		filepath.Join(dir, "bin"),
+		filepath.Join(dir, ".cache"),
+	} {
+		_ = os.Remove(path)
+	}
+	return nil
+}
+
+func scheduleWindowsUninstall(executablePath, executableDir string, pid int) error {
 	batFile, err := os.CreateTemp(os.TempDir(), "lofi-uninstall-*.bat")
 	if err != nil {
 		return fmt.Errorf("create uninstall script: %w", err)
@@ -76,7 +108,7 @@ func scheduleWindowsUninstall(executablePath, cacheDir string, pid int) error {
 	cmd.Env = append(
 		os.Environ(),
 		"LOFI_UNINSTALL_EXE="+executablePath,
-		"LOFI_UNINSTALL_CACHE="+cacheDir,
+		"LOFI_UNINSTALL_DIR="+executableDir,
 	)
 	if err := cmd.Start(); err != nil {
 		_ = os.Remove(batPath)
@@ -93,6 +125,11 @@ func removePathReference(executableDir string) bool {
 }
 
 func removeWindowsUserPathEntry(executableDir string) bool {
+	// Only undo what install.ps1 did; a shared dir like C:\tools stays on PATH.
+	installerDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "lofi-radio", "bin")
+	if !strings.EqualFold(filepath.Clean(executableDir), installerDir) {
+		return false
+	}
 	// Update user PATH persistently with exact-segment removal.
 	ps := `$target = $env:TARGET_DIR; ` +
 		`$path = [Environment]::GetEnvironmentVariable("Path","User"); ` +
@@ -124,6 +161,7 @@ func removeUnixPathExports(executableDir string) bool {
 		filepath.Join(home, ".profile"),
 		filepath.Join(home, ".bashrc"),
 		filepath.Join(home, ".zshrc"),
+		filepath.Join(home, ".config", "fish", "config.fish"),
 	}
 
 	updatedAny := false
@@ -148,11 +186,9 @@ func stripPathLines(profilePath, executableDir string) (bool, error) {
 	lines := strings.Split(string(content), "\n")
 	changed := false
 	filtered := make([]string, 0, len(lines))
-	needle := normalizePathForCompare(executableDir)
 
 	for _, line := range lines {
-		normalizedLine := normalizePathForCompare(line)
-		if shouldStripPathLine(normalizedLine, needle) {
+		if shouldStripPathLine(line, executableDir) {
 			changed = true
 			continue
 		}
@@ -189,19 +225,16 @@ func stripPathLines(profilePath, executableDir string) (bool, error) {
 	return true, nil
 }
 
-func normalizePathForCompare(value string) string {
-	return strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
-}
-
-func shouldStripPathLine(normalizedLine, needle string) bool {
-	trimmed := strings.TrimSpace(normalizedLine)
-	if strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, needle) {
-		return false
+// shouldStripPathLine matches only the exact lines install.sh writes, so a user's
+// own PATH line that merely mentions the dir (with other entries) is left alone.
+func shouldStripPathLine(line, dir string) bool {
+	switch strings.TrimSpace(line) {
+	case `export PATH="` + dir + `:$PATH"`,
+		`export PATH="$PATH:` + dir + `"`,
+		`set -gx PATH "` + dir + `" $PATH`:
+		return true
 	}
-
-	return strings.HasPrefix(trimmed, "export path=") ||
-		strings.HasPrefix(trimmed, "path=") ||
-		strings.HasPrefix(trimmed, "set path=")
+	return false
 }
 
 func windowsUninstallScript(pid int) string {
@@ -210,7 +243,8 @@ func windowsUninstallScript(pid int) string {
 		"setlocal\r\n" +
 		"set \"PID=" + pidValue + "\"\r\n" +
 		"set \"EXE=%LOFI_UNINSTALL_EXE%\"\r\n" +
-		"set \"CACHE=%LOFI_UNINSTALL_CACHE%\"\r\n" +
+		"set \"DIR=%LOFI_UNINSTALL_DIR%\"\r\n" +
+		"cd /d \"%TEMP%\"\r\n" +
 		"set \"COUNT=0\"\r\n" +
 		":wait\r\n" +
 		"tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\r\n" +
@@ -220,13 +254,13 @@ func windowsUninstallScript(pid int) string {
 		")\r\n" +
 		":retryexe\r\n" +
 		"del /F /Q \"%EXE%\" >nul 2>nul\r\n" +
-		"if not exist \"%EXE%\" goto delcache\r\n" +
+		"if not exist \"%EXE%\" goto deldir\r\n" +
 		"set /a COUNT+=1\r\n" +
 		"if %COUNT% GEQ 30 goto fail\r\n" +
 		"timeout /t 1 /nobreak >nul\r\n" +
 		"goto retryexe\r\n" +
-		":delcache\r\n" +
-		"if exist \"%CACHE%\" rmdir /S /Q \"%CACHE%\" >nul 2>nul\r\n" +
+		":deldir\r\n" +
+		"rmdir \"%DIR%\" >nul 2>nul\r\n" +
 		":fail\r\n" +
 		"del \"%~f0\" >nul 2>nul\r\n" +
 		"endlocal\r\n"
